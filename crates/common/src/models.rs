@@ -3,10 +3,10 @@ use chrono::{DateTime, Utc};
 use clickhouse::Row;
 use serde::{Deserialize, Serialize};
 
-/// Статус блока в системе.
-/// Canonical - часть основной цепочки.
-/// Orphan - отброшенная ветка (реорг).
-/// Finalized - блок, который мы помещаем в итоговую БД.
+/// Block's status on chain
+/// Canonical - part of canonical chain.
+/// Orphan - reorg chain.
+/// Finalized - Block in final DB.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BlockStatus {
     #[default]
@@ -22,7 +22,7 @@ impl Type<sqlx::Postgres> for BlockStatus {
     }
 }
 
-// Status -> string
+// Status -> String
 impl sqlx::Encode<'_, sqlx::Postgres> for BlockStatus {
     fn encode_by_ref(
             &self,
@@ -37,7 +37,7 @@ impl sqlx::Encode<'_, sqlx::Postgres> for BlockStatus {
     }
 }
 
-// string -> Status
+// String -> Status
 impl<'r> sqlx::Decode<'r, sqlx::Postgres> for BlockStatus {
     fn decode(value: <sqlx::Postgres as sqlx::Database>::ValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
         let s: String = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
@@ -70,8 +70,8 @@ pub struct Chainstate {
     pub updated_at: Option<DateTime<Utc>>
 }
 
-/// Модель для вставки в ClickHouse (таблица raw_logs_head)
-/// Derives: Row (для вставки), Serialize (для отправки)
+/// Model for ClickHouse
+/// Derives: Row (to insert), Serialize (to send)
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RawLog {
     pub chain_id: u64,
@@ -86,4 +86,21 @@ pub struct RawLog {
     pub topic3: String,
     pub data: String,
     pub block_timestamp: u32
+}
+
+/// Decode model
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct Erc20Transfer {
+    pub chain_id: u64,
+    pub block_number: u64,
+    pub block_hash: String,
+    pub tx_hash: String,
+    pub log_index: u32,
+    pub block_timestamp: u32,
+    // Decoded
+    pub token_address: String,
+    pub from: String,
+    pub to: String,
+    pub value: String,
+    pub value_numeric: f64
 }
