@@ -1,0 +1,27 @@
+[package]
+name = "ingest"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Наша общая библиотека
+common = { path = "../../crates/common" }
+
+# Асинхронность и ошибки
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+dotenv = "0.15"
+
+# Логирование
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Базы данных
+sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "chrono"] }
+
+# Alloy
+alloy = { version = "1.3.0", features = ["full", "node-bindings"] }
+
+# Утилиты
+url = "2.4"
+chrono = "0.4"

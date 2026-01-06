@@ -1,0 +1,45 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Docker / Infra
+postgres_data/
+clickhouse_data/
+docker-compose.override.yml
+
+# IDEs / Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Ethereum / Foundry
+/lib/
+/out/
+/cache/
+/broadcast/
+
+# Logs & Misc
+*.log
+logs/
+tmp/
+benchmarks/results/ # Если будем генерировать файлы отчетов
+
+# Added by cargo
+
+/target
+
+
+# Added by cargo
+#
+# already existing elements were commented out
+
+#/target
