@@ -28,3 +28,7 @@ chrono = "0.4"
 
 # Clickhouse
 clickhouse = { version = "0.14.1", features = ["time"] }
+
+# Metrics
+metrics = "0.24.3"
+metrics-exporter-prometheus = "0.18.1"
