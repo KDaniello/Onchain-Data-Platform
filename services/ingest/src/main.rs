@@ -9,7 +9,10 @@ use common::models::{BlockStatus, RawLog};
 use dotenv::dotenv;
 use sqlx::{postgres::{PgPool, PgPoolOptions}};
 use std::env;
-use tracing::{info, error};
+use tracing::{info, error, warn};
+use std::time::Duration;
+use std::net::SocketAddr;
+use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -57,26 +60,66 @@ async fn main() -> Result<()> {
     info!("Connecting to RPC: {}", rpc_url);
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
 
-    // Get the latest block
-    let current_block_number = provider.get_block_number().await?;
-    info!("Processing latest block: {}", current_block_number);
+    info!("All systems go. Starting ingestion loop.");
+
+    loop {
+        if let Err(e) = processing_loop(&pg_pool, &ch_client, &provider).await {
+            error!("Error in ingestion loop {:?}. Retrying in 5s...", e);
+            sleep(Duration::from_secs(5)).await;
+        }
+    }
+}
+
+/// Define next block and get it
+async fn processing_loop<P>(pool: &PgPool, ch: &ClickHouseClient, provider: &P) -> Result<()>
+where P: Provider
+{
+    // Where we are right now in blockchain
+    let last_ingested = get_last_ingested_block(pool).await?;
+
+    // Where is chain
+    let chain_tip = provider.get_block_number().await?;
+
+    // Get next on chain
+    let target_block = last_ingested + 1;
+
+    if target_block > chain_tip {
+        info!("Synced at block {}. Waiting for new blocks...", last_ingested);
+        sleep(Duration::from_secs(12)).await;
+        return Ok(());
+    }
+
+    let lag = chain_tip - target_block;
+    info!("Ingesting block {} (Lag: {} blocks", target_block, lag);
 
     // Get block
-    if let Some(block) = provider.get_block_by_number(BlockNumberOrTag::Number(current_block_number)).await? {
-        info!("Fetched block: {} (hash: {})", block.header.number, block.header.hash);
-    
+    if let Some(block) = provider.get_block_by_number(BlockNumberOrTag::Number(target_block)).await? {
         // Save to PG
-        save_canonical_block(&pg_pool, 1, &block).await?;
+        save_canonical_block(pool, 1, &block).await?;
         // Save tp CH
-        fetch_and_save_logs(&provider, &ch_client, &block).await?;
-
-        info!("Block {} fully inegsted into PG and CH!", current_block_number);
-        
+        fetch_and_save_logs(provider, ch, &block).await?;
     } else {
-        error!("Block {} not found on RPC!", current_block_number)
+        warn!("Block {} returned None from RPC (possible propagation delay)", target_block);
+        sleep(Duration::from_secs(1)).await;
     }
 
     Ok(()) 
+}
+
+/// Define the latest ingested block from Postgres
+async fn get_last_ingested_block(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query_scalar!(
+        r#"SELECT MAX(number) FROM canonical_blocks WHERE chain_id = 1"#
+    )
+    .fetch_one(pool)
+    .await?;
+
+    if let Some(num) = result {
+        Ok(num as u64)
+    } else {
+        info!("Database is empty. Starting from recent block...");
+        Ok(24176840)
+    }
 }
 
 // function: load to TABLE canonical_blocks
