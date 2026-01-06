@@ -13,6 +13,8 @@ use tracing::{info, error, warn};
 use std::time::Duration;
 use std::net::SocketAddr;
 use tokio::time::sleep;
+use metrics::{counter, gauge};
+use metrics_exporter_prometheus::PrometheusBuilder;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,6 +30,16 @@ async fn main() -> Result<()> {
 
     info!("Starting Ingest Service...");
     
+    // Prometheus Build
+    let builder = PrometheusBuilder::new();
+    let addr: SocketAddr = "0.0.0.0:9091".parse()?;
+    builder
+        .with_http_listener(addr)
+        .install()
+        .context("Failed to install Prometheus recorder")?;
+
+    info!("Metrics server running at http://0.0.0.0:9091/metrics");
+
     // DB url
     let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://admin:admin@localhost:5432/onchain_data".to_string());
     // rpc from env
@@ -83,14 +95,23 @@ where P: Provider
     // Get next on chain
     let target_block = last_ingested + 1;
 
+    // Metrics
+    // Which block is ingested
+    gauge!("ingest_head_block").set(target_block as f64);
+    gauge!("chain_tip_block").set(chain_tip as f64);
+
     if target_block > chain_tip {
+        gauge!("ingest_lag").set(0.0); // Lag is absent
         info!("Synced at block {}. Waiting for new blocks...", last_ingested);
         sleep(Duration::from_secs(12)).await;
         return Ok(());
     }
 
     let lag = chain_tip - target_block;
-    info!("Ingesting block {} (Lag: {} blocks", target_block, lag);
+    
+    // How far behind we are
+    gauge!("ingest_block").set(lag as f64);
+    info!("Ingesting block {} (Lag: {} blocks)", target_block, lag);
 
     // Get block
     if let Some(block) = provider.get_block_by_number(BlockNumberOrTag::Number(target_block)).await? {
@@ -98,6 +119,8 @@ where P: Provider
         save_canonical_block(pool, 1, &block).await?;
         // Save tp CH
         fetch_and_save_logs(provider, ch, &block).await?;
+
+        counter!("ingest_blocks_proccessed_total").increment(1);
     } else {
         warn!("Block {} returned None from RPC (possible propagation delay)", target_block);
         sleep(Duration::from_secs(1)).await;
@@ -182,6 +205,9 @@ where P: Provider
     }
 
     let logs_count = logs.len();
+
+    counter!("ingest_logs_total").increment(logs_count as u64);
+
     let mut batch = Vec::with_capacity(logs_count);
 
     for log in logs {
