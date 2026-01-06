@@ -1,5 +1,7 @@
 use sqlx::{FromRow, Type};
 use chrono::{DateTime, Utc};
+use clickhouse::Row;
+use serde::{Deserialize, Serialize};
 
 /// Статус блока в системе.
 /// Canonical - часть основной цепочки.
@@ -66,4 +68,22 @@ pub struct Chainstate {
     pub head_hash: String,
     pub finalized_number: i64,
     pub updated_at: Option<DateTime<Utc>>
+}
+
+/// Модель для вставки в ClickHouse (таблица raw_logs_head)
+/// Derives: Row (для вставки), Serialize (для отправки)
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RawLog {
+    pub chain_id: u64,
+    pub block_number: u64,
+    pub block_hash: String,
+    pub tx_hash: String,
+    pub log_index: u32,
+    pub address: String,
+    pub topic0: String,
+    pub topic1: String,
+    pub topic2: String,
+    pub topic3: String,
+    pub data: String,
+    pub block_timestamp: u32
 }

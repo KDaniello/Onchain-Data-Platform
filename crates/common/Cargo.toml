@@ -22,3 +22,6 @@ alloy = { version = "1.3.0", features = ["full"] }
 
 # Логирование
 tracing = "0.1"
+
+# Clickhouse
+clickhouse = { version = "0.14.1", features = ["time"] }
