@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE canonical_blocks SET status = 'orphan' WHERE chain_id = 1 AND number = $1 AND hash = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bpchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3c2620b5a0402d6127f6536d1514e765f9d10747736d86ec2236b4c07f6aba23"
+}

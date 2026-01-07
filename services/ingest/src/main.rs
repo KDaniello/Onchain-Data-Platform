@@ -1,8 +1,8 @@
 use alloy::{
-    providers::{Provider, ProviderBuilder},
+    providers::{Provider, ProviderBuilder}, 
     rpc::types::{Block, BlockNumberOrTag, Filter}
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Ok, Result};
 use chrono::{TimeZone, Utc};
 use clickhouse::{Client as ClickHouseClient};
 use common::models::{RawLog};
@@ -86,35 +86,45 @@ async fn main() -> Result<()> {
 async fn processing_loop<P>(pool: &PgPool, ch: &ClickHouseClient, provider: &P) -> Result<()>
 where P: Provider
 {
-    // Where we are right now in blockchain
-    let last_ingested = get_last_ingested_block(pool).await?;
+    // Get local Head (Canonical) from Postgres -> (number, hash)
+    let local_tip = get_canonical_tip(pool).await?;
 
-    // Where is chain
+    // If DB is empty start with hard-num. Otherwise take Tip + 1
+    let target_number = local_tip.as_ref().map(|(n, _)| n + 1).unwrap_or(24176840); 
+
+    // Get next chain
     let chain_tip = provider.get_block_number().await?;
-
-    // Get next on chain
-    let target_block = last_ingested + 1;
-
-    // Metrics
-    // Which block is ingested
-    gauge!("ingest_head_block").set(target_block as f64);
+    gauge!("ingest_head_block").set(target_number as f64);
     gauge!("chain_tip_block").set(chain_tip as f64);
 
-    if target_block > chain_tip {
+    if target_number > chain_tip {
         gauge!("ingest_lag").set(0.0); // Lag is absent
-        info!("Synced at block {}. Waiting for new blocks...", last_ingested);
+        info!("Synced at block {}. Waiting for new blocks...", target_number - 1);
         sleep(Duration::from_secs(12)).await;
         return Ok(());
     }
-
-    let lag = chain_tip - target_block;
     
     // How far behind we are
-    gauge!("ingest_lag").set(lag as f64);
-    info!("Ingesting block {} (Lag: {} blocks)", target_block, lag);
+    gauge!("ingest_lag").set((chain_tip - target_number) as f64);
+    info!("Processing block {}", target_number);
 
     // Get block
-    if let Some(block) = provider.get_block_by_number(BlockNumberOrTag::Number(target_block)).await? {
+    if let Some(block) = provider.get_block_by_number(BlockNumberOrTag::Number(target_number)).await? {
+        
+        let parent_hash = block.header.parent_hash.to_string();
+
+        // Reorg check
+        if let Some((tip_num, tip_hash)) = local_tip {
+            if parent_hash != tip_hash {
+                warn!("⚠️ REORG DETECTED at block {}! RPC parent {} != Local tip {}. Rolling back block {}...",
+                target_number, parent_hash, tip_hash, tip_num);
+
+                mark_block_orphan(pool, tip_num, &tip_hash).await?;
+
+                return Ok(());
+            }
+        }
+        
         // Save to PG
         save_canonical_block(pool, 1, &block).await?;
         // Save tp CH
@@ -122,30 +132,39 @@ where P: Provider
 
         counter!("ingest_blocks_processed_total").increment(1);
     } else {
-        warn!("Block {} returned None from RPC (possible propagation delay)", target_block);
+        warn!("Block {} missing", target_number);
         sleep(Duration::from_secs(1)).await;
     }
 
     Ok(()) 
 }
 
-/// Define the latest ingested block from Postgres
-async fn get_last_ingested_block(pool: &PgPool) -> Result<u64> {
-    let result = sqlx::query_scalar!(
-        r#"SELECT MAX(number) FROM canonical_blocks WHERE chain_id = 1"#
+/// Get canonical the latest block -> (number, hash)
+async fn get_canonical_tip(pool: &PgPool) -> Result<Option<(u64, String)>> {
+    let row = sqlx::query!(
+        r#"SELECT number, hash FROM canonical_blocks WHERE chain_id = 1 AND status = 'canonical' ORDER BY number DESC LIMIT 1"#
     )
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
 
-    if let Some(num) = result {
-        Ok(num as u64)
-    } else {
-        info!("Database is empty. Starting from recent block...");
-        Ok(24176840)
-    }
+    Ok(row.map(|r| (r.number as u64, r.hash)))
+} 
+
+/// Mark block as orphan (leave from canonical chain)
+async fn mark_block_orphan(pool: &PgPool, number: u64, hash: &str) -> Result<()> {
+    sqlx::query!(
+        "UPDATE canonical_blocks SET status = 'orphan' WHERE chain_id = 1 AND number = $1 AND hash = $2",
+        number as i64, hash
+    )
+    .execute(pool)
+    .await?;
+
+    counter!("ingest_reorgs_total").increment(1);
+    info!("Block {} ({}) marked as Orphan", number, hash);
+    Ok(())
 }
 
-// function: load to TABLE canonical_blocks
+/// function: load to TABLE canonical_blocks
 async fn save_canonical_block(pg_pool: &PgPool, chain_id: i64, block:&Block) -> Result<()> {
 
     // u64 to i64
@@ -160,22 +179,6 @@ async fn save_canonical_block(pg_pool: &PgPool, chain_id: i64, block:&Block) -> 
         .single()
         .context("Invalid timestamp")?;
 
-    // Reorg check
-    let mut tx = pg_pool.begin().await?;
-
-    sqlx::query!(
-        r#"
-        UPDATE canonical_blocks
-        SET status = 'orphan'
-        WHERE chain_id = $1 AND number = $2 AND status = 'canonical'
-        "#,
-        chain_id,
-        number
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    // SQL Query
     sqlx::query!(
         r#"
         INSERT INTO canonical_blocks (chain_id, number, hash, parent_hash, block_timestamp, status, inserted_at)
@@ -186,12 +189,10 @@ async fn save_canonical_block(pg_pool: &PgPool, chain_id: i64, block:&Block) -> 
         number,
         hash,
         parent_hash,
-        timestamp,
+        timestamp
     )
-    .execute(&mut *tx)
+    .execute(pg_pool)
     .await?;
-
-    tx.commit().await?;
 
     Ok(())
 }
@@ -200,43 +201,34 @@ async fn save_canonical_block(pg_pool: &PgPool, chain_id: i64, block:&Block) -> 
 async fn fetch_and_save_logs<P>(provider: &P, ch: &ClickHouseClient, block: &Block) -> Result<()> 
 where P: Provider
 {
-    let block_number = block.header.number;
-    let timestamp = block.header.timestamp as u32;
 
     let filter = Filter::new().at_block_hash(block.header.hash);
     let logs = provider.get_logs(&filter).await?;
 
     if logs.is_empty() {
-        info!("No logs in block {}", block_number);
         return Ok(());
     }
 
-    let logs_count = logs.len();
-
-    counter!("ingest_logs_total").increment(logs_count as u64);
-
-    let mut batch = Vec::with_capacity(logs_count);
+    let mut batch = Vec::with_capacity(logs.len());
 
     for log in logs {
-        let tx_hash = log.transaction_hash.map(|h| h.to_string()).unwrap_or_default();
-        let address = log.address().to_string().to_lowercase();
-        let topics = log.topics();
-
         batch.push(RawLog {
             chain_id: 1,
-            block_number,
+            block_number: block.header.number,
             block_hash: block.header.hash.to_string(),
-            tx_hash,
+            tx_hash: log.transaction_hash.map(|h| h.to_string()).unwrap_or_default(),
             log_index: log.log_index.unwrap_or(0) as u32,
-            address,
-            topic0: topics.get(0).map(|t| t.to_string()).unwrap_or_default(),
-            topic1: topics.get(1).map(|t| t.to_string()).unwrap_or_default(),
-            topic2: topics.get(2).map(|t| t.to_string()).unwrap_or_default(),
-            topic3: topics.get(3).map(|t| t.to_string()).unwrap_or_default(),
+            address: log.address().to_string().to_lowercase(),
+            topic0: log.topics().get(0).map(|t| t.to_string()).unwrap_or_default(),
+            topic1: log.topics().get(1).map(|t| t.to_string()).unwrap_or_default(),
+            topic2: log.topics().get(2).map(|t| t.to_string()).unwrap_or_default(),
+            topic3: log.topics().get(3).map(|t| t.to_string()).unwrap_or_default(),
             data: log.data().data.to_string(),
-            block_timestamp: timestamp
+            block_timestamp: block.header.timestamp as u32
         });
     }
+
+    let batch_len = batch.len() as u64;
 
     // Batch insert into ClickHouse
     let mut insert = ch.insert::<RawLog>("raw_logs_head").await?;
@@ -245,6 +237,6 @@ where P: Provider
     }
     insert.end().await?;
 
-    info!("Inserted {} logs into ClickHouse", logs_count);
+    counter!("ingest_logs_total").increment(batch_len as u64);
     Ok(())
 }
