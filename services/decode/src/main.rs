@@ -12,7 +12,7 @@ use std::{
     time::Duration
 };
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
 sol! {
@@ -65,52 +65,61 @@ async fn main() -> Result<()> {
 async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &str) -> Result<()> {
     // Find, where we stopped
     // if db is empty, start with 0 or block with logs
-    let last_decoded_row: Option<u64> = ch
+    let last_block: u64 = ch
         .query("SELECT toUInt64(coalesce(max(block_number), 0)) FROM erc20_transfers")
-        .fetch_one::<u64>()
-        .await
-        .ok();
-    let start_block = last_decoded_row.unwrap_or(0);
+        .fetch_one::<u64>().await.unwrap_or(0);
 
-    // Find Postgres stage
-    let canonical_tip_row = sqlx::query_scalar!(
-        "SELECT MAX(number) FROM canonical_blocks WHERE status = 'canonical' AND chain_id = 1"
+    let start_block = if last_block == 0 { 24176840 } else { last_block + 1 };
+
+    // Get canonical batch (100) from Postgres
+    let canonical_batch = sqlx::query!(
+        r#"
+        SELECT number, hash 
+        FROM canonical_blocks 
+        WHERE chain_id = 1 AND status = 'canonical' AND number >= $1 
+        ORDER BY number ASC 
+        LIMIT 100
+        "#,
+        start_block as i64
     )
-    .fetch_one(pg)
+    .fetch_all(pg)
     .await?;
 
-    let canonical_tip = canonical_tip_row.unwrap_or(0) as u64;
-    
-    // If we are on canonical chain -> sleep
-    if start_block >= canonical_tip {
-        info!("Synced with canonical tip {}. Sleeping...", canonical_tip);
+    // Sleep if not new canonical_block
+    if canonical_batch.is_empty() {
+        info!("Synced. Waiting for canonical blocks...");
         sleep(Duration::from_secs(2)).await;
         return Ok(());
     }
 
+    // Reorg-Safe
+    let hashes_str: String = canonical_batch.iter()
+        .map(|b| format!("'{}'", b.hash))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let end_block = canonical_batch.last().unwrap().number as u64;
+
+    info!("Processing canonical blocks {} -> {} ({} blocks)", start_block, end_block, canonical_batch.len());
+
     // Get batch of logs, whiсh ones are transfers
-    // filter on start_block
     let query = format!(
         r#"
-        SELECT ?fields
-        FROM raw_logs_head
-        WHERE topic0 = '{}'
-          AND block_number > {} 
-          AND block_number <= {} 
+        SELECT ?fields 
+        FROM raw_logs_head 
+        WHERE topic0 = '{}' 
+          AND block_hash IN ({})
         ORDER BY block_number ASC
-        LIMIT 5000"#,
-        transfer_topic, start_block, canonical_tip
+        "#,
+        transfer_topic, hashes_str
     );
 
     let logs: Vec<RawLog> = ch.query(&query).fetch_all().await?;
 
     if logs.is_empty() {
-        info!("No new logs to decode. Synced at block {}. Sleeping...", start_block);
-        sleep(Duration::from_secs(5)).await;
+        warn!("No logs found in blocks {} -> {}. Decoder might get stuck if no transfers occur for a long time.", start_block, end_block);
         return Ok(());
     }
-
-    info!("Fetched {} raw logs (blocks {} -> {}, limit {})", logs.len(), start_block, canonical_tip, canonical_tip);
 
     // Decoding
     let mut transfers = Vec::with_capacity(logs.len());
