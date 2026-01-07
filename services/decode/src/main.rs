@@ -12,7 +12,7 @@ use std::{
     time::Duration
 };
 use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
 sol! {
@@ -64,12 +64,13 @@ async fn main() -> Result<()> {
 /// Loop decoded
 async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &str) -> Result<()> {
     // Find, where we stopped
-    // if db is empty, start with 0 or block with logs
-    let last_block: u64 = ch
-        .query("SELECT toUInt64(coalesce(max(block_number), 0)) FROM erc20_transfers")
-        .fetch_one::<u64>().await.unwrap_or(0);
-
-    let start_block = if last_block == 0 { 24176840 } else { last_block + 1 };
+    let cursor_row = sqlx::query!(
+        "SELECT last_processed_block FROM decoder_state WHERE id = 'erc20_worker'"
+    )
+    .fetch_one(pg)
+    .await?;
+    
+    let start_block = cursor_row.last_processed_block as u64 + 1;
 
     // Get canonical batch (100) from Postgres
     let canonical_batch = sqlx::query!(
@@ -92,34 +93,23 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
         return Ok(());
     }
 
-    // Reorg-Safe
-    let hashes_str: String = canonical_batch.iter()
-        .map(|b| format!("'{}'", b.hash))
-        .collect::<Vec<_>>()
-        .join(",");
-
     let end_block = canonical_batch.last().unwrap().number as u64;
+    let hashes_str = canonical_batch.iter().map(|b| format!("'{}'", b.hash)).collect::<Vec<_>>().join(",");
 
-    info!("Processing canonical blocks {} -> {} ({} blocks)", start_block, end_block, canonical_batch.len());
+    info!("Processing blocks {} -> {} ({} blocks)", start_block, end_block, canonical_batch.len());
 
-    // Get batch of logs, whiсh ones are transfers
+    // Query to CH
     let query = format!(
         r#"
         SELECT ?fields 
         FROM raw_logs_head 
-        WHERE topic0 = '{}' 
-          AND block_hash IN ({})
+        WHERE topic0 = '{}' AND block_hash IN ({})
         ORDER BY block_number ASC
         "#,
         transfer_topic, hashes_str
     );
 
     let logs: Vec<RawLog> = ch.query(&query).fetch_all().await?;
-
-    if logs.is_empty() {
-        warn!("No logs found in blocks {} -> {}. Decoder might get stuck if no transfers occur for a long time.", start_block, end_block);
-        return Ok(());
-    }
 
     // Decoding
     let mut transfers = Vec::with_capacity(logs.len());
@@ -159,7 +149,7 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
                     from: event.from.to_string().to_lowercase(),
                     to: event.to.to_string().to_lowercase(),
                     value: val_str,
-                    value_numeric: val_f64
+                    value_approx: val_f64
                 });
             }
             Err(_) => {
@@ -174,10 +164,15 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
             insert.write(row).await?;
         }
         insert.end().await?;
-
-        let max_block = transfers.last().map(|t| t.block_number).unwrap_or(start_block);
-        info!("Decoded and saved {} transfers (up to block {})", transfers.len(), max_block);
+        info!("Saved {} transfers", transfers.len());
     }
+
+    sqlx::query!(
+        "UPDATE decoder_state SET last_processed_block = $1, updated_at = NOW() WHERE id = 'erc20_worker'",
+        end_block as i64
+    )
+    .execute(pg)
+    .await?;
 
     Ok(())
 }

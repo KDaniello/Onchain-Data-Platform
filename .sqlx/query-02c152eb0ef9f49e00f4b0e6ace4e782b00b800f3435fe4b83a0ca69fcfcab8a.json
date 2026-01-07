@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE decoder_state SET last_processed_block = $1, updated_at = NOW() WHERE id = 'erc20_worker'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "02c152eb0ef9f49e00f4b0e6ace4e782b00b800f3435fe4b83a0ca69fcfcab8a"
+}

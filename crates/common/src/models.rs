@@ -102,5 +102,5 @@ pub struct Erc20Transfer {
     pub from: String,
     pub to: String,
     pub value: String,
-    pub value_numeric: f64
+    pub value_approx: f64
 }
