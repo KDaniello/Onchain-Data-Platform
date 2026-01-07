@@ -13,6 +13,7 @@ use std::{
 };
 use tokio::time::sleep;
 use tracing::{error, info};
+use sqlx::postgres::{PgPool, PgPoolOptions};
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -41,12 +42,19 @@ async fn main() -> Result<()> {
         .with_password(&ch_pass)
         .with_database("onchain_data");
 
+    // Postgres
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pg_pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await?;
+            
     // Get Hash topic-Transfer
     let transfer_topic = Transfer::SIGNATURE_HASH.to_string();
     info!("Targeting Transfer topic: {}", transfer_topic);
 
     loop {
-        if let Err(e) = processing_loop(&ch, &transfer_topic).await {
+        if let Err(e) = processing_loop(&ch, &pg_pool, &transfer_topic).await {
             error!("Error in decoder loop: {:?}. Sleeping...", e);
             sleep(Duration::from_secs(5)).await;
         }
@@ -54,25 +62,44 @@ async fn main() -> Result<()> {
 }
 
 /// Loop decoded
-async fn processing_loop(ch: &ClickHouseClient, transfer_topic: &str) -> Result<()> {
+async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &str) -> Result<()> {
     // Find, where we stopped
     // if db is empty, start with 0 or block with logs
-    let start_block = ch
+    let last_decoded_row: Option<u64> = ch
         .query("SELECT toUInt64(coalesce(max(block_number), 0)) FROM erc20_transfers")
         .fetch_one::<u64>()
         .await
-        .unwrap_or(0);
+        .ok();
+    let start_block = last_decoded_row.unwrap_or(0);
+
+    // Find Postgres stage
+    let canonical_tip_row = sqlx::query_scalar!(
+        "SELECT MAX(number) FROM canonical_blocks WHERE status = 'canonical' AND chain_id = 1"
+    )
+    .fetch_one(pg)
+    .await?;
+
+    let canonical_tip = canonical_tip_row.unwrap_or(0) as u64;
     
+    // If we are on canonical chain -> sleep
+    if start_block >= canonical_tip {
+        info!("Synced with canonical tip {}. Sleeping...", canonical_tip);
+        sleep(Duration::from_secs(2)).await;
+        return Ok(());
+    }
+
     // Get batch of logs, whiсh ones are transfers
     // filter on start_block
     let query = format!(
         r#"
         SELECT ?fields
         FROM raw_logs_head
-        WHERE topic0 = '{}' AND block_number > {}
+        WHERE topic0 = '{}'
+          AND block_number > {} 
+          AND block_number <= {} 
         ORDER BY block_number ASC
         LIMIT 5000"#,
-        transfer_topic, start_block
+        transfer_topic, start_block, canonical_tip
     );
 
     let logs: Vec<RawLog> = ch.query(&query).fetch_all().await?;
@@ -83,7 +110,7 @@ async fn processing_loop(ch: &ClickHouseClient, transfer_topic: &str) -> Result<
         return Ok(());
     }
 
-    info!("Fetched {} raw logs to decode (starting from block {})", logs.len(), start_block);
+    info!("Fetched {} raw logs (blocks {} -> {}, limit {})", logs.len(), start_block, canonical_tip, canonical_tip);
 
     // Decoding
     let mut transfers = Vec::with_capacity(logs.len());
@@ -112,6 +139,11 @@ async fn processing_loop(ch: &ClickHouseClient, transfer_topic: &str) -> Result<
                 let val_str = event.value.to_string();
                 let val_f64 = val_str.parse::<f64>().unwrap_or(0.0);
 
+                // U256 -> u128
+                let val_u128 = event.value.saturating_to::<u128>();
+
+                let val_exact = val_u128 as i128;
+
                 transfers.push(Erc20Transfer {
                     chain_id: log.chain_id,
                     block_number: log.block_number,
@@ -123,6 +155,7 @@ async fn processing_loop(ch: &ClickHouseClient, transfer_topic: &str) -> Result<
                     from: event.from.to_string(),
                     to: event.to.to_string(),
                     value: val_str,
+                    value_exact: val_exact,
                     value_numeric: val_f64
                 });
             }
@@ -140,7 +173,7 @@ async fn processing_loop(ch: &ClickHouseClient, transfer_topic: &str) -> Result<
         insert.end().await?;
 
         let max_block = transfers.last().map(|t| t.block_number).unwrap_or(start_block);
-         info!("Decoded and saved {} transfers (up to block {})", transfers.len(), max_block);
+        info!("Decoded and saved {} transfers (up to block {})", transfers.len(), max_block);
     }
 
     Ok(())
