@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT number, hash\n        FROM canonical_blocks\n        WHERE chain_id = 1\n          AND status = 'canonical'\n          AND number >= $1\n          AND number <= $2\n        ORDER BY number ASC\n        LIMIT $3\n        ",
+  "query": "\n        SELECT number, hash\n        FROM canonical_blocks\n        WHERE chain_id = $1::bigint AND status = 'canonical'\n        ORDER BY number DESC\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -16,8 +16,6 @@
     ],
     "parameters": {
       "Left": [
-        "Int8",
-        "Int8",
         "Int8"
       ]
     },
@@ -26,5 +24,5 @@
       false
     ]
   },
-  "hash": "d577a5c1bbfebeaf50257dcfc698ac2d9a3fc3be599faa7f2a5295f379ecadd2"
+  "hash": "80dd1a0fc90045cbcb864b3dd65cc6a3ffa2aa467ac6f581b698e8fb90e236ef"
 }

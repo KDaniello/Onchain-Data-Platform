@@ -5,15 +5,12 @@ use alloy::{
 };
 use anyhow::{Result};
 use clickhouse::Client as ClickHouseClient;
-use common::models::{RawLog, Erc20Transfer};
+use common::{models::{RawLog, Erc20Transfer}, settings::Settings, db::{connect_ch, connect_pg}};
 use dotenv::dotenv;
-use std::{
-    env,
-    time::Duration
-};
+use std::{time::Duration};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::postgres::{PgPool};
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -26,64 +23,72 @@ const BATCH_SIZE: i64 = 500;
 async fn main() -> Result<()> {
     // env
     dotenv().ok();
+
     // Logs
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
             .add_directive(tracing::Level::INFO.into()))
         .init();
 
+    // Settings
+    let settings = Settings::new()?;
+
     info!("Starting Decoder Service...");
 
-    // Config ClickHouse
-    let ch_url = "http://localhost:8123";
-    let ch_user = env::var("CH_USER").unwrap_or("default".to_string());
-    let ch_pass = env::var("CH_PASSWORD").unwrap_or("".to_string());
-
-    let ch = ClickHouseClient::default()
-        .with_url(ch_url)
-        .with_user(&ch_user)
-        .with_password(&ch_pass)
-        .with_database("onchain_data");
+    // ClickHouse
+    let ch = connect_ch(&settings.clickhouse);
 
     // Postgres
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pg_pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await?;
+    let pg_pool = connect_pg(&settings.database).await?;
             
     // Get Hash topic-Transfer
     let transfer_topic = Transfer::SIGNATURE_HASH.to_string();
     info!("Targeting Transfer topic: {}", transfer_topic);
 
     loop {
-        if let Err(e) = processing_loop(&ch, &pg_pool, &transfer_topic).await {
+        if let Err(e) = processing_loop(&ch, &pg_pool, &transfer_topic, settings.chain.chain_id).await {
             error!("Error in decoder loop: {:?}. Sleeping...", e);
             sleep(Duration::from_secs(5)).await;
         }
     }
 }
 
+#[derive(sqlx::FromRow)]
+struct BlockInfo {
+    number: i64,
+    hash: String,
+}
+
 /// Loop decoded
-async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &str) -> Result<()> {
+async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &str, chain_id: u64) -> Result<()> {
     let state = sqlx::query!(
         r#"SELECT last_processed_block, last_processed_hash FROM decoder_state WHERE id = 'erc20_worker'"#
     )
-    .fetch_one(pg)
+    .fetch_optional(pg)
     .await?;
 
     // Find, where we stopped
-    let last_processed = state.last_processed_block;
-    let last_hash: Option<String> = state.last_processed_hash.map(|h| h.trim().to_string());
+    let (last_processed, last_hash) = match state {
+        Some(r) => (r.last_processed_block, r.last_processed_hash.map(|h| h.trim().to_string())),
+        None => {
+            // Инициализация, если нет записи
+            sqlx::query!("INSERT INTO decoder_state (id, last_processed_block) VALUES ('erc20_worker', 0)")
+                .execute(pg).await?;
+            (0, None)
+        }
+    };
+
     // canonical tip
-    let tip = sqlx::query!(
+    let tip = sqlx::query_as!(
+        BlockInfo,
         r#"
         SELECT number, hash
         FROM canonical_blocks
-        WHERE chain_id = 1 AND status = 'canonical'
+        WHERE chain_id = $1::bigint AND status = 'canonical'
         ORDER BY number DESC
         LIMIT 1
-        "#
+        "#,
+        chain_id as i64
     )
     .fetch_optional(pg)
     .await?;
@@ -104,60 +109,52 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
     // Check if it was reorg 
     let mut reorg_detected = false;
     if last_processed > 0 {
-        if let Some(stored_hash) = last_hash.as_deref() {
+        if let Some(stored_hash) = last_hash {
             let current_hash_row = sqlx::query!(
                 r#"
                 SELECT hash
                 FROM canonical_blocks
-                WHERE chain_id = 1 AND status = 'canonical' AND number = $1
+                WHERE chain_id = $1::bigint AND status = 'canonical' AND number = $2::bigint
                 LIMIT 1
                 "#,
+                chain_id as i64,
                 last_processed
             )
             .fetch_optional(pg)
             .await?;
 
             match current_hash_row {
-                Some(r) if r.hash != stored_hash => {
-                    reorg_detected = true;
-                    warn!(
-                        "Reorg detected: canonical hash at {} changed (stored={} current={})",
-                        last_processed, stored_hash, r.hash
-                    );
-                }
-                None => {
-                    reorg_detected = true;
-                    warn!(
-                        "Reorg/rollback detected: no canonical block at last_processed={}",
-                        last_processed
-                    );
-                }
-                _ => {} // Hash matches
+                Some(r) if r.hash != stored_hash => reorg_detected = true,
+                None => reorg_detected = true,
+                _ => {}
             }
         }
     }
 
     // Calculate Start Block
     let start_scan_block = if reorg_detected {
+        warn!("Reorg detected! Rolling back...");
         (last_processed - SAFE_REORG_DEPTH + 1).max(0)
     } else {
         last_processed + 1
     };
 
     // Get canonical batch from Postgres
-    let canonical_batch = sqlx::query!(
+    let canonical_batch = sqlx::query_as!(
+        BlockInfo,
         r#"
         SELECT number, hash
         FROM canonical_blocks
-        WHERE chain_id = 1
+        WHERE chain_id = $1::bigint
           AND status = 'canonical'
-          AND number >= $1
-          AND number <= $2
+          AND number >= $2::bigint
+          AND number <= $3::bigint
         ORDER BY number ASC
-        LIMIT $3
+        LIMIT $4
         "#,
+        chain_id as i64,
         start_scan_block,
-        tip_number,
+        tip.number,
         BATCH_SIZE
     )
     .fetch_all(pg)
@@ -186,10 +183,10 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
         r#"
         SELECT ?fields 
         FROM raw_logs_head 
-        WHERE topic0 = '{}' AND block_hash IN ({})
+        WHERE chain_id = {} AND topic0 = '{}' AND block_hash IN ({})
         ORDER BY block_number ASC
         "#,
-        transfer_topic, hashes_str
+        chain_id, transfer_topic, hashes_str
     );
 
     let logs: Vec<RawLog> = ch.query(&query).fetch_all().await?;
@@ -253,7 +250,7 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
     sqlx::query!(
         r#"
         UPDATE decoder_state
-        SET last_processed_block = $1,
+        SET last_processed_block = $1::bigint,
             last_processed_hash = $2,
             updated_at = NOW()
         WHERE id = 'erc20_worker'

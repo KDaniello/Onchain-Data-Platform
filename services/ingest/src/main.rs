@@ -5,10 +5,10 @@ use alloy::{
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use clickhouse::{Client as ClickHouseClient};
-use common::models::{RawLog};
+use common::{
+    db::{connect_ch, connect_pg}, models::RawLog, settings::{Settings}};
 use dotenv::dotenv;
-use sqlx::{postgres::{PgPool, PgPoolOptions}};
-use std::env;
+use sqlx::{postgres::{PgPool}};
 use tracing::{info, error, warn};
 use std::time::Duration;
 use std::net::SocketAddr;
@@ -16,10 +16,19 @@ use tokio::time::sleep;
 use metrics::{counter, gauge};
 use metrics_exporter_prometheus::PrometheusBuilder;
 
+#[derive(sqlx::FromRow)]
+struct BlockTip {
+    number: i64,
+    hash: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // env
     dotenv().ok();
+
+    // Init config
+    let settings = Settings::new().context("Failed to load settings")?;
 
     // Logs
     tracing_subscriber::fmt()
@@ -28,7 +37,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    info!("Starting Ingest Service...");
+    info!("Starting Ingest Service for Chain ID: {}", settings.chain.chain_id);
     
     // Prometheus Build (Metrics)
     let builder = PrometheusBuilder::new();
@@ -40,42 +49,24 @@ async fn main() -> Result<()> {
 
     info!("Metrics server running at http://0.0.0.0:9091/metrics");
 
-    // DB url
-    let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://admin:admin@localhost:5432/onchain_data".to_string());
-    // rpc from env
-    let rpc_url = env::var("RPC_HTTP_URL").expect("RPC_HTTP_URL must be set");
-
-    // ClickHouse Settings
-    let ch_url = "http://localhost:8123";
-    let ch_user = env::var("CH_USER").unwrap_or("default".to_string());
-    let ch_pass = env::var("CH_PASSWORD").unwrap_or("".to_string());
-
     // Connect to Postgres
     info!("Connecting to Postgres...");
-    let pg_pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .context("Failed to connect to Postgres")?;
+    let pg_pool = connect_pg(&settings.database).await?;
     info!("Connected to Postgres!");
 
     // Connect to ClickHouse
     info!("Connecting to ClickHouse...");
-    let ch_client = ClickHouseClient::default()
-        .with_url(ch_url)
-        .with_user(&ch_user)
-        .with_password(&ch_pass)
-        .with_database("onchain_data");
+    let ch_client = connect_ch(&settings.clickhouse);
     info!("Connected to ClickHouse!");
 
     // Connect to RPC
-    info!("Connecting to RPC: {}", rpc_url);
-    let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    info!("Connecting to RPC: {}", settings.chain.rpc_url);
+    let provider = ProviderBuilder::new().connect_http(settings.chain.rpc_url.parse()?);
 
     info!("All systems go. Starting ingestion loop.");
 
     loop {
-        if let Err(e) = processing_loop(&pg_pool, &ch_client, &provider).await {
+        if let Err(e) = processing_loop(&pg_pool, &ch_client, &provider, &settings).await {
             error!("Error in ingestion loop {:?}. Retrying in 5s...", e);
             sleep(Duration::from_secs(5)).await;
         }
@@ -83,14 +74,17 @@ async fn main() -> Result<()> {
 }
 
 /// Define next block and get it
-async fn processing_loop<P>(pool: &PgPool, ch: &ClickHouseClient, provider: &P) -> Result<()>
+async fn processing_loop<P>(pool: &PgPool, ch: &ClickHouseClient, provider: &P, settings: &Settings) -> Result<()>
 where P: Provider
 {
+    
+    let chain_id = settings.chain.chain_id;
+
     // Get local Head (Canonical) from Postgres -> (number, hash)
-    let local_tip = get_canonical_tip(pool).await?;
+    let local_tip = get_canonical_tip(pool, chain_id).await?;
 
     // If DB is empty start with hard-num. Otherwise take Tip + 1
-    let target_number = local_tip.as_ref().map(|(n, _)| n + 1).unwrap_or(24176840); 
+    let target_number = local_tip.as_ref().map(|(n, _)| n + 1).unwrap_or(settings.chain.start_block); 
 
     // Get next chain
     let chain_tip = provider.get_block_number().await?;
@@ -119,16 +113,16 @@ where P: Provider
                 warn!("⚠️ REORG DETECTED at block {}! RPC parent {} != Local tip {}. Rolling back block {}...",
                 target_number, parent_hash, tip_hash, tip_num);
 
-                mark_block_orphan(pool, tip_num, &tip_hash).await?;
+                mark_block_orphan(pool, chain_id, tip_num, &tip_hash).await?;
 
                 return Ok(());
             }
         }
         
         // Save to PG
-        save_canonical_block(pool, 1, &block).await?;
+        save_canonical_block(pool, chain_id, &block).await?;
         // Save tp CH
-        fetch_and_save_logs(provider, ch, &block).await?;
+        fetch_and_save_logs(provider, ch, &block, chain_id).await?;
 
         counter!("ingest_blocks_processed_total").increment(1);
     } else {
@@ -140,9 +134,17 @@ where P: Provider
 }
 
 /// Get canonical the latest block -> (number, hash)
-async fn get_canonical_tip(pool: &PgPool) -> Result<Option<(u64, String)>> {
-    let row = sqlx::query!(
-        r#"SELECT number, hash FROM canonical_blocks WHERE chain_id = 1 AND status = 'canonical' ORDER BY number DESC LIMIT 1"#
+async fn get_canonical_tip(pool: &PgPool, chain_id: u64) -> Result<Option<(u64, String)>> {
+    let row = sqlx::query_as!(
+        BlockTip,
+        r#"
+        SELECT number, hash::text as "hash!"
+        FROM canonical_blocks 
+        WHERE chain_id = $1::bigint AND status = 'canonical' 
+        ORDER BY number DESC 
+        LIMIT 1
+        "#,
+        chain_id as i64
     )
     .fetch_optional(pool)
     .await?;
@@ -151,10 +153,12 @@ async fn get_canonical_tip(pool: &PgPool) -> Result<Option<(u64, String)>> {
 } 
 
 /// Mark block as orphan (leave from canonical chain)
-async fn mark_block_orphan(pool: &PgPool, number: u64, hash: &str) -> Result<()> {
+async fn mark_block_orphan(pool: &PgPool, chain_id: u64, number: u64, hash: &str) -> Result<()> {
     sqlx::query!(
-        "UPDATE canonical_blocks SET status = 'orphan' WHERE chain_id = 1 AND number = $1 AND hash = $2",
-        number as i64, hash
+        "UPDATE canonical_blocks SET status = 'orphan' WHERE chain_id = $1::bigint AND number = $2::bigint AND hash = $3",
+        chain_id as i64,
+        number as i64,
+        hash
     )
     .execute(pool)
     .await?;
@@ -165,10 +169,11 @@ async fn mark_block_orphan(pool: &PgPool, number: u64, hash: &str) -> Result<()>
 }
 
 /// function: load to TABLE canonical_blocks
-async fn save_canonical_block(pg_pool: &PgPool, chain_id: i64, block:&Block) -> Result<()> {
+async fn save_canonical_block(pg_pool: &PgPool, chain_id: u64, block:&Block) -> Result<()> {
 
     // u64 to i64
     let number = block.header.number as i64;
+    let chain_id_i64 = chain_id as i64;
 
     // to string
     let hash = block.header.hash.to_string();
@@ -186,9 +191,9 @@ async fn save_canonical_block(pg_pool: &PgPool, chain_id: i64, block:&Block) -> 
         r#"
         UPDATE canonical_blocks
         SET status = 'orphan'
-        WHERE chain_id = $1 AND number = $2 AND status = 'canonical' AND hash != $3
+        WHERE chain_id = $1::bigint AND number = $2::bigint AND status = 'canonical' AND hash != $3
         "#,
-        chain_id,
+        chain_id_i64,
         number,
         hash
     )
@@ -199,13 +204,13 @@ async fn save_canonical_block(pg_pool: &PgPool, chain_id: i64, block:&Block) -> 
     sqlx::query!(
         r#"
         INSERT INTO canonical_blocks (chain_id, number, hash, parent_hash, block_timestamp, status, inserted_at)
-        VALUES ($1, $2, $3, $4, $5, 'canonical', NOW())
+        VALUES ($1::bigint, $2::bigint, $3, $4, $5, 'canonical', NOW())
         ON CONFLICT (chain_id, hash) DO UPDATE SET
-            status = 'canonical', -- Восстанавливаем статус
+            status = 'canonical',
             parent_hash = EXCLUDED.parent_hash,
             inserted_at = NOW()
         "#,
-        chain_id,
+        chain_id_i64,
         number,
         hash,
         parent_hash,
@@ -220,7 +225,7 @@ async fn save_canonical_block(pg_pool: &PgPool, chain_id: i64, block:&Block) -> 
 }
 
 /// Get Logs from eth_getLogs and write batch to CH
-async fn fetch_and_save_logs<P>(provider: &P, ch: &ClickHouseClient, block: &Block) -> Result<()> 
+async fn fetch_and_save_logs<P>(provider: &P, ch: &ClickHouseClient, block: &Block, chain_id: u64) -> Result<()> 
 where P: Provider
 {
 
@@ -236,7 +241,7 @@ where P: Provider
 
     for log in logs {
         batch.push(RawLog {
-            chain_id: 1,
+            chain_id,
             block_number: block.header.number,
             block_hash: block.header.hash.to_string(),
             tx_hash: log.transaction_hash.map(|h| h.to_string()).unwrap_or_default(),
@@ -261,6 +266,6 @@ where P: Provider
     }
     insert.end().await?;
 
-    counter!("ingest_logs_total").increment(batch_len as u64);
+    counter!("ingest_logs_total").increment(batch_len);
     Ok(())
 }

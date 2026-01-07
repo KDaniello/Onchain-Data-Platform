@@ -5,20 +5,24 @@ use axum::{
     Json, Router
 };
 use clickhouse::{Client as ClickHouseClient};
-use common::models::Erc20Transfer;
+use common::{models::Erc20Transfer, settings::Settings, db::{connect_ch, connect_pg}};
 use dotenv::dotenv;
 use serde::{Deserialize};
-use std::{
-    env, net::SocketAddr
-};
+use std::{net::SocketAddr};
 use tower_http::trace::{TraceLayer};
 use tracing::{error, info};
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::postgres::{PgPool};
 
 #[derive(Clone)]
 struct AppState {
     ch: ClickHouseClient,
-    pg: PgPool
+    pg: PgPool,
+    chain_id: u64
+}
+
+#[derive(sqlx::FromRow)]
+struct BlockHash {
+    hash: String,
 }
 
 #[tokio::main]
@@ -28,25 +32,16 @@ async fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
             .add_directive(tracing::Level::INFO.into()))
         .init();
+    let settings = Settings::new().expect("Failed to load settings");
 
     info!("Starting API Services...");
 
-    // Config ClickHouse
-    let ch_url = "http://localhost:8123";
+    // ClickHouse
+    let ch = connect_ch(&settings.clickhouse);
+    // PG
+    let pg = connect_pg(&settings.database).await.expect("PG Connect");
 
-    let ch = ClickHouseClient::default()
-        .with_url(ch_url)
-        .with_database("onchain_data");
-
-    // Config PG
-    let db_url = env::var("DATABASE_URL").expect("DB URL set");
-    let pg = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&db_url)
-        .await
-        .unwrap();
-
-    let state = AppState { ch, pg };
+    let state = AppState { ch, pg, chain_id: settings.chain.chain_id };
 
     // Router
     let app = Router::new()
@@ -80,8 +75,10 @@ async fn get_transfers(
 
     let limit = params.limit.unwrap_or(50).min(100); // Min 1000 records
 
-    let canonical_hashes = sqlx::query!(
-        "SELECT hash FROM canonical_blocks WHERE chain_id = 1 AND status = 'canonical' ORDER BY number DESC LIMIT 1000"
+    let canonical_hashes = sqlx::query_as!(
+        BlockHash,
+        "SELECT hash FROM canonical_blocks WHERE chain_id = $1::bigint AND status = 'canonical' ORDER BY number DESC LIMIT 100",
+        state.chain_id as i64
     )
     .fetch_all(&state.pg)
     .await
@@ -109,13 +106,13 @@ async fn get_transfers(
 
     let query = format!(
         r#"
-        SELECT * FROM erc20_transfers 
-        WHERE {} 
+        SELECT * FROM erc20_transfers_head 
+        WHERE chain_id = {} AND {} 
           AND block_hash IN ({}) 
         ORDER BY block_number DESC, log_index DESC 
         LIMIT {}
         "#, 
-        base_query, hashes_str, limit
+        state.chain_id, base_query, hashes_str, limit
     );
 
     let transfers: Vec<Erc20Transfer> = state.ch
