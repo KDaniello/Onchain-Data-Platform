@@ -196,7 +196,7 @@ where P: Provider
     let block_number = block.header.number;
     let timestamp = block.header.timestamp as u32;
 
-    let filter = Filter::new().select(block_number);
+    let filter = Filter::new().at_block_hash(block.header.hash);
     let logs = provider.get_logs(&filter).await?;
 
     if logs.is_empty() {

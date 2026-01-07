@@ -42,7 +42,7 @@ impl<'r> sqlx::Decode<'r, sqlx::Postgres> for BlockStatus {
     fn decode(value: <sqlx::Postgres as sqlx::Database>::ValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
         let s: String = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
         match s.as_str() {
-            "canonacal" => Ok(BlockStatus::Canonical),
+            "canonical" => Ok(BlockStatus::Canonical),
             "orphan" => Ok(BlockStatus::Orphan),
             "finalized" => Ok(BlockStatus::Finalized),
             _ => Err(format!("Unknown block status: {}", s).into()),

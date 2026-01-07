@@ -72,14 +72,24 @@ struct TranserParams {
 async fn get_transfers(
     State(state): State<AppState>,
     Query(params): Query<TranserParams>,
-) -> Result<Json<Vec<Erc20Transfer>>, StatusCode> {
+) -> Result<Json<Vec<Erc20Transfer>>, (StatusCode, String)> {
 
     let limit = params.limit.unwrap_or(50).min(1000); // Min 1000 records
 
     let query = if let Some(token) = params.token {
+
+        // Validation eth address
+        let clean_token = token.trim();
+        if !clean_token.starts_with("0x") || clean_token.len() != 42 || hex::decode(&clean_token[2..]).is_err() {
+            return Err((StatusCode::BAD_REQUEST, "Invalid token address format".to_string()));
+        }
+
+        // Normalize: lowercase
+        let safe_token = clean_token.to_lowercase();
+
         format!(
             "SELECT * FROM erc20_transfers WHERE token_address = '{}' ORDER BY block_number DESC, log_index DESC LIMIT {}",
-            token, limit)
+            safe_token, limit)
     } else {
         format!(
             "SELECT * FROM erc20_transfers ORDER BY block_number DESC, log_index DESC LIMIT {}",
@@ -92,7 +102,7 @@ async fn get_transfers(
         .await
         .map_err(|e| {
             error!("ClickHouse error: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
         })?;
 
     Ok(Json(transfers))
