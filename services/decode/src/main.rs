@@ -139,11 +139,6 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
                 let val_str = event.value.to_string();
                 let val_f64 = val_str.parse::<f64>().unwrap_or(0.0);
 
-                // U256 -> u128
-                let val_u128 = event.value.saturating_to::<u128>();
-
-                let val_exact = val_u128 as i128;
-
                 transfers.push(Erc20Transfer {
                     chain_id: log.chain_id,
                     block_number: log.block_number,
@@ -152,10 +147,9 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
                     log_index: log.log_index,
                     block_timestamp: log.block_timestamp,
                     token_address: log.address,
-                    from: event.from.to_string(),
-                    to: event.to.to_string(),
+                    from: event.from.to_string().to_lowercase(),
+                    to: event.to.to_string().to_lowercase(),
                     value: val_str,
-                    value_exact: val_exact,
                     value_numeric: val_f64
                 });
             }

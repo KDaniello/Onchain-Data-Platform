@@ -102,6 +102,5 @@ pub struct Erc20Transfer {
     pub from: String,
     pub to: String,
     pub value: String,
-    pub value_exact: i128, // BigDecimal
     pub value_numeric: f64
 }
