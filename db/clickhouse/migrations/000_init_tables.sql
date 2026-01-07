@@ -16,10 +16,12 @@ CREATE TABLE onchain_data.raw_logs_head
     topic2 String,
     topic3 String,
     data String,
-    block_timestamp DateTime
+    block_timestamp UInt32,
+    inserted_at UInt64
 )
-ENGINE = ReplacingMergeTree()
-ORDER BY (chain_id, block_number, block_hash, log_index);
+ENGINE = ReplacingMergeTree(inserted_at)
+PARTITION BY toYYYYMM(toDateTime(block_timestamp))
+ORDER BY (chain_id, block_hash, tx_hash, log_index);
 
 
 -- Transfers
@@ -32,12 +34,14 @@ CREATE TABLE onchain_data.erc20_transfers
     block_hash String,
     tx_hash String,
     log_index UInt32,
-    block_timestamp DateTime,
+    block_timestamp UInt32,
     token_address String,
-    from String,
-    to String,
+    from_address String,
+    to_address String,
     value String,
-    value_approx Float64
+    value_approx Float64,
+    inserted_at UInt64
 )
-ENGINE = ReplacingMergeTree()
-ORDER BY (chain_id, token_address, block_number, log_index);
+ENGINE = ReplacingMergeTree(inserted_at)
+PARTITION BY toYYYYMM(toDateTime(block_timestamp))
+ORDER BY (chain_id, block_hash, tx_hash, log_index);

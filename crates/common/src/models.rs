@@ -85,7 +85,8 @@ pub struct RawLog {
     pub topic2: String,
     pub topic3: String,
     pub data: String,
-    pub block_timestamp: u32
+    pub block_timestamp: u32,
+    pub inserted_at: u64
 }
 
 /// Decode model
@@ -99,8 +100,9 @@ pub struct Erc20Transfer {
     pub block_timestamp: u32,
     // Decoded
     pub token_address: String,
-    pub from: String,
-    pub to: String,
+    pub from_address: String,
+    pub to_address: String,
     pub value: String,
-    pub value_approx: f64
+    pub value_approx: f64,
+    pub inserted_at: u64
 }
