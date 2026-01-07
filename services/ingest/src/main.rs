@@ -179,11 +179,31 @@ async fn save_canonical_block(pg_pool: &PgPool, chain_id: i64, block:&Block) -> 
         .single()
         .context("Invalid timestamp")?;
 
+    let mut tx = pg_pool.begin().await?;
+
+    // Remove canonical status from any blocks
+    sqlx::query!(
+        r#"
+        UPDATE canonical_blocks
+        SET status = 'orphan'
+        WHERE chain_id = $1 AND number = $2 AND status = 'canonical' AND hash != $3
+        "#,
+        chain_id,
+        number,
+        hash
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // If block was orphan, let it to canonical back 
     sqlx::query!(
         r#"
         INSERT INTO canonical_blocks (chain_id, number, hash, parent_hash, block_timestamp, status, inserted_at)
         VALUES ($1, $2, $3, $4, $5, 'canonical', NOW())
-        ON CONFLICT (chain_id, hash) DO NOTHING
+        ON CONFLICT (chain_id, hash) DO UPDATE SET
+            status = 'canonical', -- Восстанавливаем статус
+            parent_hash = EXCLUDED.parent_hash,
+            inserted_at = NOW()
         "#,
         chain_id,
         number,
@@ -191,8 +211,10 @@ async fn save_canonical_block(pg_pool: &PgPool, chain_id: i64, block:&Block) -> 
         parent_hash,
         timestamp
     )
-    .execute(pg_pool)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(())
 }
