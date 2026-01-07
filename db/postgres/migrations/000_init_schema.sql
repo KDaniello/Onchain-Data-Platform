@@ -14,11 +14,11 @@ CREATE TABLE canonical_blocks (
     PRIMARY KEY (chain_id, hash)
 );
 
-CREATE UNIQUE INDEX ux_canonical_height 
+CREATE UNIQUE INDEX IF NOT EXISTS ux_canonical_height 
 ON canonical_blocks (chain_id, number) 
 WHERE status = 'canonical';
 
-CREATE INDEX idx_blocks_chain_number ON canonical_blocks(chain_id, number);
+CREATE INDEX IF NOT EXISTS idx_blocks_chain_number ON canonical_blocks(chain_id, number);
 
 -- Table cursors for decoder
 CREATE TABLE decoder_state (
@@ -27,7 +27,3 @@ CREATE TABLE decoder_state (
     last_processed_hash CHAR(66),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
-
--- Init cursos as 0 (start_block)
-INSERT INTO decoder_state (id, last_processed_block, last_processed_hash) 
-VALUES ('erc20_worker', 24176839, NULL);

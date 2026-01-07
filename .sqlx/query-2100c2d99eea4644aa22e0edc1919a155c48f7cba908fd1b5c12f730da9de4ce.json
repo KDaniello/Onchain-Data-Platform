@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO decoder_state (id, last_processed_block) VALUES ('erc20_worker', 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "2100c2d99eea4644aa22e0edc1919a155c48f7cba908fd1b5c12f730da9de4ce"
+}

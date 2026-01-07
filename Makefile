@@ -1,21 +1,50 @@
-.PHONY: up down logs db-shell
+.PHONY: up down nuke logs pg-shell ch-shell migrate
 
-# Поднять инфраструктуру
+COMPOSE_FILE=deploy/docker-compose.yml
+PG_CONTAINER=odp-postgres
+CH_CONTAINER=odp-clickhouse
+PG_DB=onchain_data
+PG_USER=admin
+
+# Main Commands
+
+# Up
 up:
-	docker-compose -f deploy/docker-compose.yml up -d
+	@echo "🚀 Starting infrastructure..."
+	docker-compose -f $(COMPOSE_FILE) up -d
+	@echo "⏳ Waiting for databases to initialize (10s)..."
+	@sleep 10
+	@$(MAKE) migrate
+	@echo "✅ System is up and ready! Run 'cargo run' to start services."
 
-# Уронить инфраструктуру
+# 2. Stop
 down:
-	docker-compose -f deploy/docker-compose.yml down
+	docker-compose -f $(COMPOSE_FILE) down
+
+# 3. DELETE
+nuke:
+	@echo "💥 Destroying everything (including data)..."
+	docker-compose -f $(COMPOSE_FILE) down -v
+	@echo "🧹 Cleaned."
+
+
+# Helper Commands
+
+# Migrations
+migrate:
+	@echo "📦 Migrating Postgres..."
+	cat db/postgres/migrations/000_init_schema.sql | docker exec -i $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB)
+	@echo "📦 Migrating ClickHouse..."
+	cat db/clickhouse/migrations/000_init_tables.sql | docker exec -i $(CH_CONTAINER) clickhouse-client --multiquery
 
 # Логи
 logs:
-	docker-compose -f deploy/docker-compose.yml logs -f
+	docker-compose -f $(COMPOSE_FILE) logs -f
 
-# Зайти в SQL консоль Postgres
+# Консоль Postgres
 pg-shell:
-	docker exec -it odp-postgres psql -U admin -d onchain_data
+	docker exec -it $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB)
 
-# Зайти в клиент Clickhouse
+# Клиент ClickHouse
 ch-shell:
-	docker exec -it odp-clickhouse clickhouse-client
+	docker exec -it $(CH_CONTAINER) clickhouse-client

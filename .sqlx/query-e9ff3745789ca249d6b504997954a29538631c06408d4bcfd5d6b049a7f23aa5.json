@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE decoder_state\n        SET last_processed_block = $1::bigint,\n            last_processed_hash = $2,\n            updated_at = NOW()\n        WHERE id = 'erc20_worker'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bpchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e9ff3745789ca249d6b504997954a29538631c06408d4bcfd5d6b049a7f23aa5"
+}

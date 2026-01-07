@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO canonical_blocks (chain_id, number, hash, parent_hash, block_timestamp, status, inserted_at)\n        VALUES ($1::bigint, $2::bigint, $3, $4, $5, 'canonical', NOW())\n        ON CONFLICT (chain_id, hash) DO UPDATE SET\n            status = 'canonical',\n            parent_hash = EXCLUDED.parent_hash,\n            inserted_at = NOW()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bpchar",
+        "Bpchar",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cc905bd9f782a533793733759ebfeeb3dd39da3603eb5309a566b9275a4a8507"
+}
