@@ -27,3 +27,7 @@ CREATE TABLE decoder_state (
     last_processed_hash CHAR(66),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+INSERT INTO decoder_state (id, last_processed_block) 
+VALUES ('finalizer_worker', 0) 
+ON CONFLICT (id) DO NOTHING;

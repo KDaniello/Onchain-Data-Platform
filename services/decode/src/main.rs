@@ -3,7 +3,7 @@ use alloy::{
     primitives::{Log, LogData},
     sol_types::SolEvent
 };
-use anyhow::{Result};
+use anyhow::{Result, Context};
 use clickhouse::Client as ClickHouseClient;
 use common::{models::{RawLog, Erc20Transfer}, settings::Settings, db::{connect_ch, connect_pg}};
 use dotenv::dotenv;
@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
         .init();
 
     // Settings
-    let settings = Settings::new()?;
+    let settings = Settings::new().context("Config load failed")?;
 
     info!("Starting Decoder Service...");
 
@@ -238,7 +238,7 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
         }
 
         if !transfers.is_empty() {
-            let mut insert = ch.insert::<Erc20Transfer>("erc20_transfers").await?;
+            let mut insert = ch.insert::<Erc20Transfer>("erc20_transfers_head").await?;
             for row in transfers.iter() { 
                 insert.write(row).await?; 
             }
