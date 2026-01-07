@@ -110,7 +110,7 @@ where P: Provider
     let lag = chain_tip - target_block;
     
     // How far behind we are
-    gauge!("ingest_block").set(lag as f64);
+    gauge!("ingest_lag").set(lag as f64);
     info!("Ingesting block {} (Lag: {} blocks)", target_block, lag);
 
     // Get block
@@ -120,7 +120,7 @@ where P: Provider
         // Save tp CH
         fetch_and_save_logs(provider, ch, &block).await?;
 
-        counter!("ingest_blocks_proccessed_total").increment(1);
+        counter!("ingest_blocks_processed_total").increment(1);
     } else {
         warn!("Block {} returned None from RPC (possible propagation delay)", target_block);
         sleep(Duration::from_secs(1)).await;
@@ -160,31 +160,38 @@ async fn save_canonical_block(pg_pool: &PgPool, chain_id: i64, block:&Block) -> 
         .single()
         .context("Invalid timestamp")?;
 
-    // Status - canonical
-    let status = BlockStatus::Canonical;
+    // Reorg check
+    let mut tx = pg_pool.begin().await?;
+
+    sqlx::query!(
+        r#"
+        UPDATE canonical_blocks
+        SET status = 'orphan'
+        WHERE chain_id = $1 AND number = $2 AND status = 'canonical'
+        "#,
+        chain_id,
+        number
+    )
+    .execute(&mut *tx)
+    .await?;
 
     // SQL Query
     sqlx::query!(
         r#"
-        INSERT INTO canonical_blocks
-        (chain_id, number, hash, parent_hash, block_timestamp, status, inserted_at)
-        VALUES ($1, $2, $3, $4, $5, $6, NOW())
-        ON CONFLICT (chain_id, number) DO UPDATE SET
-            hash = EXCLUDED.hash,
-            parent_hash = EXCLUDED.parent_hash,
-            block_timestamp = EXCLUDED.block_timestamp,
-            status = EXCLUDED.status,
-            inserted_at = NOW()
+        INSERT INTO canonical_blocks (chain_id, number, hash, parent_hash, block_timestamp, status, inserted_at)
+        VALUES ($1, $2, $3, $4, $5, 'canonical', NOW())
+        ON CONFLICT (chain_id, hash) DO NOTHING
         "#,
         chain_id,
         number,
         hash,
         parent_hash,
         timestamp,
-        status as BlockStatus
     )
-    .execute(pg_pool)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(())
 }
