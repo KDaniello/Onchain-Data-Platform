@@ -5,7 +5,7 @@ use alloy::{
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use clickhouse::{Client as ClickHouseClient};
-use common::models::{BlockStatus, RawLog};
+use common::models::{RawLog};
 use dotenv::dotenv;
 use sqlx::{postgres::{PgPool, PgPoolOptions}};
 use std::env;
@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
 
     info!("Starting Ingest Service...");
     
-    // Prometheus Build
+    // Prometheus Build (Metrics)
     let builder = PrometheusBuilder::new();
     let addr: SocketAddr = "0.0.0.0:9091".parse()?;
     builder
@@ -219,7 +219,7 @@ where P: Provider
 
     for log in logs {
         let tx_hash = log.transaction_hash.map(|h| h.to_string()).unwrap_or_default();
-        let address = log.address().to_string();
+        let address = log.address().to_string().to_lowercase();
         let topics = log.topics();
 
         batch.push(RawLog {
