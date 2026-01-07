@@ -2,7 +2,7 @@ use alloy::{
     providers::{Provider, ProviderBuilder}, 
     rpc::types::{Block, BlockNumberOrTag, Filter}
 };
-use anyhow::{Context, Ok, Result};
+use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use clickhouse::{Client as ClickHouseClient};
 use common::models::{RawLog};
@@ -231,6 +231,7 @@ where P: Provider
         return Ok(());
     }
 
+    let now_ms = Utc::now().timestamp_millis() as u64;
     let mut batch = Vec::with_capacity(logs.len());
 
     for log in logs {
@@ -246,7 +247,8 @@ where P: Provider
             topic2: log.topics().get(2).map(|t| t.to_string()).unwrap_or_default(),
             topic3: log.topics().get(3).map(|t| t.to_string()).unwrap_or_default(),
             data: log.data().data.to_string(),
-            block_timestamp: block.header.timestamp as u32
+            block_timestamp: block.header.timestamp as u32,
+            inserted_at: now_ms
         });
     }
 

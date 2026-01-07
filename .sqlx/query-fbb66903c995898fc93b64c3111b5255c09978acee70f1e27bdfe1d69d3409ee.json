@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT last_processed_block, last_processed_hash FROM decoder_state WHERE id = 'erc20_worker'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_processed_block",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "last_processed_hash",
+        "type_info": "Bpchar"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "fbb66903c995898fc93b64c3111b5255c09978acee70f1e27bdfe1d69d3409ee"
+}
