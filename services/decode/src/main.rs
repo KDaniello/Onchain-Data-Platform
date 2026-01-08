@@ -12,6 +12,8 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 use sqlx::postgres::{PgPool};
 use common::shutdown::shutdown_signal;
+use common::metrics::init_metrics;
+use metrics::{counter, gauge};
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -23,6 +25,9 @@ const BATCH_SIZE: i64 = 500;
 async fn main() -> Result<()> {
     // env
     dotenv().ok();
+
+    // Connect to metrics
+    init_metrics(9092)?; // 9092 port for decode
 
     // Logs
     tracing_subscriber::fmt()
@@ -174,7 +179,7 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
         .await?;
     }
 
-    // canonical tip
+    // Get tip from DB
     let tip = sqlx::query_as!(
         BlockInfo,
         r#"
@@ -196,6 +201,12 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
     };
 
     let tip_number = tip.number;
+
+    // Metrics
+    gauge!("decode_head_block").set(last_processed as f64);
+    gauge!("decode_chain_tip").set(tip.number as f64);
+    let lag = (tip.number - last_processed).max(0);
+    gauge!("decode_lag").set(lag as f64);
 
     if tip_number <= last_processed {
         sleep(Duration::from_secs(2)).await;
@@ -303,12 +314,17 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
         }
 
         if !transfers.is_empty() {
+            let count = transfers.len() as u64; // Safe count
+
             let mut insert = ch.insert::<Erc20Transfer>("erc20_transfers_head").await?;
             for row in transfers.iter() { 
                 insert.write(row).await?; 
             }
             insert.end().await?;
-            info!("Upserted {} transfers", transfers.len());
+
+            counter!("decode_transfers_total").increment(count);
+
+            info!("Upserted {} transfers", count);
         }
     }
 

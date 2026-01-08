@@ -16,3 +16,6 @@ serde = "1.0"
 chrono = "0.4"
 hex = "0.4"
 sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "chrono"] }
+
+# Metrics
+metrics = "0.24.3"

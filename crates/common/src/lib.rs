@@ -2,6 +2,6 @@ pub mod models;
 pub mod settings;
 pub mod db;
 pub mod shutdown;
+pub mod metrics;
 
-// Переэкспорт для удобства (common::CanonicalBlock)
 pub use models::*;

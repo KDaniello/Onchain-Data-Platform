@@ -11,14 +11,14 @@ use clickhouse::{Client as ClickHouseClient};
 use common::{
     db::{connect_ch, connect_pg}, models::RawLog, settings::{Settings}};
 use common::shutdown::shutdown_signal;
+use common::metrics::init_metrics;
 use dotenv::dotenv;
 use sqlx::{postgres::{PgPool}};
 use tracing::{info, error, warn};
-use std::time::Duration;
-use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
-use metrics::{counter, gauge};
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics::{counter, gauge, histogram};
+
 
 #[derive(sqlx::FromRow)]
 struct BlockTip {
@@ -31,6 +31,9 @@ async fn main() -> Result<()> {
     // env
     dotenv().ok();
 
+    // Connect to metrics
+    init_metrics(9091)?; // 9091 port for ingest
+
     // Init config
     let settings = Settings::new().context("Failed to load settings")?;
 
@@ -42,16 +45,6 @@ async fn main() -> Result<()> {
         .init();
 
     info!("Starting Ingest Service for Chain ID: {}", settings.chain.chain_id);
-    
-    // Prometheus Build (Metrics)
-    let builder = PrometheusBuilder::new();
-    let addr: SocketAddr = "0.0.0.0:9091".parse()?;
-    builder
-        .with_http_listener(addr)
-        .install()
-        .context("Failed to install Prometheus recorder")?;
-
-    info!("Metrics server running at http://0.0.0.0:9091/metrics");
 
     // Connect to Postgres
     info!("Connecting to Postgres...");
@@ -96,7 +89,9 @@ async fn main() -> Result<()> {
 async fn processing_loop<P>(pool: &PgPool, ch: &ClickHouseClient, provider: &P, settings: &Settings) -> Result<()>
 where P: Provider
 {
-    
+    // Start to measure time
+    let start_time = Instant::now();
+
     let chain_id = settings.chain.chain_id;
 
     // Get local Head (Canonical) from Postgres -> (number, hash)
@@ -107,8 +102,13 @@ where P: Provider
 
     // Get next chain
     let chain_tip = provider.get_block_number().await?;
+
     gauge!("ingest_head_block").set(target_number as f64);
-    gauge!("chain_tip_block").set(chain_tip as f64);
+    gauge!("ingest_chain_tip").set(chain_tip as f64);
+
+    // Lag
+    let lag = (chain_tip as i64 - target_number as i64).max(0);
+    gauge!("ingest_lag").set(lag as f64);
 
     if target_number > chain_tip {
         gauge!("ingest_lag").set(0.0); // Lag is absent
@@ -118,7 +118,6 @@ where P: Provider
     }
     
     // How far behind we are
-    gauge!("ingest_lag").set((chain_tip - target_number) as f64);
     info!("Processing block {}", target_number);
 
     // Get block
@@ -157,6 +156,7 @@ where P: Provider
         fetch_and_save_logs(provider, ch, &block, chain_id).await?;
 
         counter!("ingest_blocks_processed_total").increment(1);
+        histogram!("ingest_block_duration_seconds").record(start_time.elapsed().as_secs_f64());
     } else {
         warn!("Block {} missing", target_number);
         sleep(Duration::from_secs(1)).await;
