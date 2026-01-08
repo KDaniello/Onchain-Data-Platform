@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT hash::text as \"hash!\" -- Приводим к text, чтобы sqlx точно понял тип\n        FROM canonical_blocks \n        WHERE chain_id = $1::bigint AND status = 'canonical' \n        ORDER BY number DESC \n        LIMIT 100\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "hash!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "945fb796dedde61e3cb92b5b9998038ca595a2e0ede979ece8d5453373722651"
+}
