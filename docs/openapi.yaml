@@ -1,0 +1,113 @@
+openapi: 3.0.3
+info:
+  title: Onchain Data Platform API
+  description: |
+    High-performance, reorg-safe blockchain data indexer.
+    
+    ## Layers
+    - `head`: Real-time data (ReplacingMergeTree), subject to reorgs.
+    - `finalized`: Confirmed data (MergeTree), immutable.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:4000
+    description: Local development
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Ok"
+
+  /head:
+    get:
+      summary: Get current indexer head state
+      responses:
+        '200':
+          description: Current head state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeadState'
+
+  /transfers:
+    get:
+      summary: Get ERC-20 transfers
+      parameters:
+        - name: token
+          in: query
+          schema:
+            type: string
+          description: Filter by token address (0x...)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 1000
+      responses:
+        '200':
+          description: List of transfers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Erc20Transfer'
+
+components:
+  schemas:
+    HeadState:
+      type: object
+      properties:
+        chain_id:
+          type: integer
+          example: 1
+        head_number:
+          type: integer
+          example: 18000123
+        head_hash:
+          type: string
+          example: "0xabc..."
+        finalized_number:
+          type: integer
+          example: 18000059
+        lag_blocks:
+          type: integer
+          example: 0
+        updated_at:
+          type: string
+          format: date-time
+
+    Erc20Transfer:
+      type: object
+      properties:
+        chain_id:
+          type: integer
+        block_number:
+          type: integer
+        block_hash:
+          type: string
+        tx_hash:
+          type: string
+        log_index:
+          type: integer
+        token_address:
+          type: string
+        from_address:
+          type: string
+        to_address:
+          type: string
+        value:
+          type: string
+          description: "Raw uint256 value as string"
+        value_approx:
+          type: number
+          description: "Approximate float value (lossy)"
