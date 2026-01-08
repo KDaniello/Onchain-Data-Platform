@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE chain_state \n        SET head_number = $2::bigint, head_hash = $3, updated_at = NOW()\n        WHERE chain_id = $1::bigint\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bpchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b4b138e7b48f292a408b8cc26853f253386a873bec82c24771ffa6a652e86306"
+}

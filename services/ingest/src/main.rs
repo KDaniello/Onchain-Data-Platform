@@ -1,3 +1,6 @@
+mod reorg;
+use reorg::{detect_and_handle_reorg, apply_reorg};
+
 use alloy::{
     providers::{Provider, ProviderBuilder}, 
     rpc::types::{Block, BlockNumberOrTag, Filter}
@@ -111,9 +114,20 @@ where P: Provider
         if let Some((tip_num, tip_hash)) = local_tip {
             if parent_hash != tip_hash {
                 warn!("⚠️ REORG DETECTED at block {}! RPC parent {} != Local tip {}. Rolling back block {}...",
-                target_number, parent_hash, tip_hash, tip_num);
+                    target_number, parent_hash, tip_hash, tip_num);
 
-                mark_block_orphan(pool, chain_id, tip_num, &tip_hash).await?;
+                // Let find Reorg blocks 
+                let reorg_result = detect_and_handle_reorg(
+                    pool, 
+                    provider, 
+                    chain_id, 
+                    &block, 
+                    tip_num as i64, 
+                    tip_hash
+                ).await?;
+
+                // Apply to DB
+                apply_reorg(pool, chain_id, &reorg_result, &block).await?;
 
                 return Ok(());
             }
@@ -121,6 +135,8 @@ where P: Provider
         
         // Save to PG
         save_canonical_block(pool, chain_id, &block).await?;
+        // Update Global state
+        update_chain_state(pool, chain_id, &block).await?;
         // Save tp CH
         fetch_and_save_logs(provider, ch, &block, chain_id).await?;
 
@@ -151,22 +167,6 @@ async fn get_canonical_tip(pool: &PgPool, chain_id: u64) -> Result<Option<(u64, 
 
     Ok(row.map(|r| (r.number as u64, r.hash)))
 } 
-
-/// Mark block as orphan (leave from canonical chain)
-async fn mark_block_orphan(pool: &PgPool, chain_id: u64, number: u64, hash: &str) -> Result<()> {
-    sqlx::query!(
-        "UPDATE canonical_blocks SET status = 'orphan' WHERE chain_id = $1::bigint AND number = $2::bigint AND hash = $3",
-        chain_id as i64,
-        number as i64,
-        hash
-    )
-    .execute(pool)
-    .await?;
-
-    counter!("ingest_reorgs_total").increment(1);
-    info!("Block {} ({}) marked as Orphan", number, hash);
-    Ok(())
-}
 
 /// function: load to TABLE canonical_blocks
 async fn save_canonical_block(pg_pool: &PgPool, chain_id: u64, block:&Block) -> Result<()> {
@@ -267,5 +267,26 @@ where P: Provider
     insert.end().await?;
 
     counter!("ingest_logs_total").increment(batch_len);
+    Ok(())
+}
+
+async fn update_chain_state(
+    pool: &PgPool, chain_id: u64, block: &Block
+) -> Result<()> {
+    sqlx::query!(
+        r#"
+        INSERT INTO chain_state (chain_id, head_number, head_hash, updated_at)
+        VALUES ($1::bigint, $2::bigint, $3, NOW())
+        ON CONFLICT (chain_id) DO UPDATE SET
+            head_number = EXCLUDED.head_number,
+            head_hash = EXCLUDED.head_hash,
+            updated_at = NOW()
+        "#,
+        chain_id as i64,
+        block.header.number as i64,
+        block.header.hash.to_string()
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }

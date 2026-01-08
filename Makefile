@@ -6,7 +6,8 @@ CH_CONTAINER=odp-clickhouse
 PG_DB=onchain_data
 PG_USER=admin
 
-PG_MIGRATION_FILE=db/postgres/migrations/000_init_schema.sql
+PG_MIGRATION_FILE_1=db/postgres/migrations/000_init_schema.sql
+PG_MIGRATION_FILE_2=db/postgres/migrations/001_add_chain_state.sql
 CH_MIGRATION_FILE=db/clickhouse/migrations/000_init_tables.sql
 
 # Main Commands
@@ -48,10 +49,10 @@ wait-for-db:
 
 migrate:
 	@echo "📦 Migrating Postgres..."
-	cat $(PG_MIGRATION_FILE) | docker exec -i $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB)
-	
+	cat $(PG_MIGRATION_FILE_1) | docker exec -i $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB)
+	cat $(PG_MIGRATION_FILE_2) | docker exec -i $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB)
+
 	@echo "📦 Migrating ClickHouse..."
-	# Флаг --echo выведет выполняемые запросы, чтобы видеть, где упало
 	cat $(CH_MIGRATION_FILE) | docker exec -i $(CH_CONTAINER) clickhouse-client --multiquery --echo
 
 logs:

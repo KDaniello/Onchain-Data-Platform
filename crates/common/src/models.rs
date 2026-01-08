@@ -106,3 +106,31 @@ pub struct Erc20Transfer {
     pub value_approx: f64,
     pub inserted_at: u64
 }
+
+/// Global state of the indexer for a specific chain
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ChainState {
+    pub chain_id: i64,
+    pub head_number: i64,
+    pub head_hash: String,
+    pub finalized_number: i64,
+    pub finalized_hash: Option<String>,
+    pub updated_at: Option<DateTime<Utc>>
+}
+
+/// Audit log for reorg events
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ReorgAudit {
+    pub id: i32,
+    pub chain_id: i64,
+    pub detected_at: Option<DateTime<Utc>>,
+    pub old_head_number: i64,
+    pub old_head_hash: String,
+    pub new_head_number: i64,
+    pub new_head_hash: String,
+    pub lca_number: i64,
+    pub lca_hash: String,
+    pub depth: i32,
+    pub blocks_orphaned: i32,
+    pub reprocessed: Option<bool>
+}

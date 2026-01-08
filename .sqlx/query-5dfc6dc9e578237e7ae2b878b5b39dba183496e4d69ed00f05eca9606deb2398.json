@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT last_processed_block FROM decoder_state WHERE id = 'finalizer_worker'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_processed_block",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5dfc6dc9e578237e7ae2b878b5b39dba183496e4d69ed00f05eca9606deb2398"
+}

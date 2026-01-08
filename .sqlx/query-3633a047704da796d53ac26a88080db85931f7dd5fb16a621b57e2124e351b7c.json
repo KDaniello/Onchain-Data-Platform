@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO reorg_audit \n        (chain_id, old_head_number, old_head_hash, new_head_number, new_head_hash, \n         lca_number, lca_hash, depth, blocks_orphaned, detected_at)\n        VALUES ($1::bigint, $2::bigint, $3, $4::bigint, $5, $6::bigint, $7, $8, $9, NOW())\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bpchar",
+        "Int8",
+        "Bpchar",
+        "Int8",
+        "Bpchar",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3633a047704da796d53ac26a88080db85931f7dd5fb16a621b57e2124e351b7c"
+}
