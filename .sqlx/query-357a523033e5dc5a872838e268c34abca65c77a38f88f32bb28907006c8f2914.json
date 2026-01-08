@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE decoder_state SET last_processed_block = $1::bigint, updated_at = NOW() WHERE id = 'finalizer_worker'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "357a523033e5dc5a872838e268c34abca65c77a38f88f32bb28907006c8f2914"
+}

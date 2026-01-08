@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO chain_state (chain_id, head_number, head_hash, updated_at)\n        VALUES ($1::bigint, $2::bigint, $3, NOW())\n        ON CONFLICT (chain_id) DO UPDATE SET\n            head_number = EXCLUDED.head_number,\n            head_hash = EXCLUDED.head_hash,\n            updated_at = NOW()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bpchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "87e64007993e2a45ab82bce223bfa46fe7e6cb0100174b76b36b01fa49098ad1"
+}

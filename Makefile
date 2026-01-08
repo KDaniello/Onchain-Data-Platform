@@ -6,16 +6,19 @@ CH_CONTAINER=odp-clickhouse
 PG_DB=onchain_data
 PG_USER=admin
 
+PG_MIGRATION_FILE_1=db/postgres/migrations/000_init_schema.sql
+PG_MIGRATION_FILE_2=db/postgres/migrations/001_add_chain_state.sql
+CH_MIGRATION_FILE=db/clickhouse/migrations/000_init_tables.sql
+
 # Main Commands
 
 # Up
 up:
 	@echo "🚀 Starting infrastructure..."
 	docker-compose -f $(COMPOSE_FILE) up -d
-	@echo "⏳ Waiting for databases to initialize (10s)..."
-	@sleep 10
+	@$(MAKE) wait-for-db
 	@$(MAKE) migrate
-	@echo "✅ System is up and ready! Run 'cargo run' to start services."
+	@echo "✅ System is READY! Run 'cargo run' to start services."
 
 # 2. Stop
 down:
@@ -29,22 +32,34 @@ nuke:
 
 
 # Helper Commands
+wait-for-db:
+	@echo "⏳ Waiting for Postgres..."
+	@until docker exec $(PG_CONTAINER) pg_isready -U $(PG_USER) > /dev/null 2>&1; do \
+		echo "   ...postgres loading"; \
+		sleep 2; \
+	done
+	@echo "✅ Postgres is up."
 
-# Migrations
+	@echo "⏳ Waiting for ClickHouse..."
+	@until docker exec $(CH_CONTAINER) clickhouse-client --query "SELECT 1" > /dev/null 2>&1; do \
+		echo "   ...clickhouse loading"; \
+		sleep 2; \
+	done
+	@echo "✅ ClickHouse is up."
+
 migrate:
 	@echo "📦 Migrating Postgres..."
-	cat db/postgres/migrations/000_init_schema.sql | docker exec -i $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB)
-	@echo "📦 Migrating ClickHouse..."
-	cat db/clickhouse/migrations/000_init_tables.sql | docker exec -i $(CH_CONTAINER) clickhouse-client --multiquery
+	cat $(PG_MIGRATION_FILE_1) | docker exec -i $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB)
+	cat $(PG_MIGRATION_FILE_2) | docker exec -i $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB)
 
-# Логи
+	@echo "📦 Migrating ClickHouse..."
+	cat $(CH_MIGRATION_FILE) | docker exec -i $(CH_CONTAINER) clickhouse-client --multiquery --echo
+
 logs:
 	docker-compose -f $(COMPOSE_FILE) logs -f
 
-# Консоль Postgres
 pg-shell:
 	docker exec -it $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB)
 
-# Клиент ClickHouse
 ch-shell:
 	docker exec -it $(CH_CONTAINER) clickhouse-client

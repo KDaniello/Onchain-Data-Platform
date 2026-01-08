@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT hash \n            FROM canonical_blocks \n            WHERE chain_id = $1::bigint AND number = $2::bigint AND status = 'canonical'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "hash",
+        "type_info": "Bpchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0fd2592a10219f589ea6fdea07453ca23b0a0cb90654a9e04d78ffab5f2eac11"
+}

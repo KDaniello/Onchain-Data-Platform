@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT number, hash \n        FROM canonical_blocks \n        WHERE chain_id = $1::bigint \n          AND status = 'canonical' \n          AND number > $2::bigint \n          AND number <= $3::bigint\n        ORDER BY number ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "number",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "hash",
+        "type_info": "Bpchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "4ef07955dc333810a517747f28f304fa3107cc8c2ab9741adeb7c8e47d8f5748"
+}
