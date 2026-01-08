@@ -110,7 +110,7 @@ async fn check_cursor_validity(
                 // Ok
                 Ok(last_processed_block)
             } else {
-                // block becomes orphan! Or finalized
+                // block becomes orphan or finalized
                 // If orphan, we need to back
                 warn!("🚨 Decoder cursor is on ORPHAN block {} ({}). Rolling back...", last_processed_block, last_hash);
 

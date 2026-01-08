@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use clickhouse::{Client as ClickHouseClient};
-use common::{settings::Settings, db::{connect_ch, connect_pg}};
+use common::{db::{connect_ch, connect_pg}, settings::Settings};
+use common::shutdown::shutdown_signal;
 use dotenv::dotenv;
 use sqlx::postgres::PgPool;
 use std::time::Duration;
-use tokio::time::sleep;
 use tracing::{info, error};
 
 #[derive(sqlx::FromRow)]
@@ -23,8 +23,6 @@ async fn main() -> Result<()> {
             .add_directive(tracing::Level::INFO.into()))
         .init();
 
-    info!("Starting finalizer service...");
-
     let ch = connect_ch(&settings.clickhouse);
     let pg = connect_pg(&settings.database).await?;
 
@@ -33,14 +31,31 @@ async fn main() -> Result<()> {
     let chain_id = settings.chain.chain_id;
     let batch_size = 1000;
 
+    let mut shutdown_rx = shutdown_signal().subscribe();
+
+    info!("Starting Finalizer Service (Depth: {} blocks)...", depth);
+
     loop {
-        if let Err(e) = run_loop(&ch, &pg, depth, batch_size, chain_id).await {
-            error!("Finalizer error: {:?}. Retrying", e);
-            sleep(Duration::from_secs(10)).await;
+        tokio::select! {
+            res = run_loop(&ch, &pg, depth, batch_size, chain_id) => {
+                if let Err(e) = res {
+                    error!("Finalizer error: {:?}. Retrying...", e);
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+            }
+            _ = shutdown_rx.recv() => {
+                info!("🛑 Shutting down finalizer...");
+                break;
+            }
         }
     }
+
+    Ok(())
+
+    
 }
 
+/// Finalizer loop
 async fn run_loop(ch: &ClickHouseClient, pg: &PgPool, depth: i64, batch_size: i64, chain_id: u64) -> Result<()> {
     let state = sqlx::query!(
         "SELECT last_processed_block FROM decoder_state WHERE id = 'finalizer_worker'"
@@ -59,18 +74,21 @@ async fn run_loop(ch: &ClickHouseClient, pg: &PgPool, depth: i64, batch_size: i6
     .await?;
 
     let Some(tip) = tip_row else {
-        sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         return Ok(());
     };
 
+    // Safety height to finalize
     let safe_height = tip.number - depth;
 
+    // Wait for safe height
     if last_finalized >= safe_height {
         info!("Synced to safe height {}. Waiting for new blocks...", safe_height);
-        sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         return Ok(());
     }
 
+    // Get blocks' batch to finalize
     let next_end = (last_finalized + batch_size).min(safe_height);
 
     let blocks = sqlx::query_as!(
@@ -92,11 +110,14 @@ async fn run_loop(ch: &ClickHouseClient, pg: &PgPool, depth: i64, batch_size: i6
     .await?;
 
     if blocks.is_empty() {
-        update_cursor(pg, next_end).await?;
+        // Just move cursor
+        update_cursor(pg, chain_id, next_end, "").await?;
         return Ok(());
     }
 
     let end_block = blocks.last().unwrap().number;
+    let end_hash = blocks.last().unwrap().hash.clone();
+
     let hashes_str = blocks.iter()
         .map(|b| format!("'{}'", b.hash))
         .collect::<Vec<_>>()
@@ -104,6 +125,10 @@ async fn run_loop(ch: &ClickHouseClient, pg: &PgPool, depth: i64, batch_size: i6
 
     info!("Finalizing blocks {} -> {} ({} blocks)", blocks[0].number, end_block, blocks.len());
 
+    // Copy data from Head to Finalized
+    // Copy only data, which block_chain is matched with canonical
+    
+    // Logs
     let query_logs = format!(
         r#"
         INSERT INTO raw_logs_finalized
@@ -114,6 +139,7 @@ async fn run_loop(ch: &ClickHouseClient, pg: &PgPool, depth: i64, batch_size: i6
     );
     ch.query(&query_logs).execute().await?;
 
+    // Transfers
     let query_transfers = format!(
         r#"
         INSERT INTO erc20_transfers_finalized
@@ -124,7 +150,7 @@ async fn run_loop(ch: &ClickHouseClient, pg: &PgPool, depth: i64, batch_size: i6
     );
     ch.query(&query_transfers).execute().await?;
 
-    update_cursor(pg, end_block).await?;
+    update_cursor(pg, chain_id, end_block, &end_hash).await?;
 
     info!("Finalized up to {}", end_block);
 
@@ -132,10 +158,44 @@ async fn run_loop(ch: &ClickHouseClient, pg: &PgPool, depth: i64, batch_size: i6
 }
 
 /// Get next block
-async fn update_cursor(pg: &PgPool, block_num: i64) -> Result<()> {
+async fn update_cursor(pg: &PgPool, chain_id: u64, block_num: i64, block_hash: &str) -> Result<()> {
+    
+    let mut tx = pg.begin().await?;
+    
+    // Worker's cursor
     sqlx::query!(
-        "UPDATE decoder_state SET last_processed_block = $1::bigint, updated_at = NOW() WHERE id = 'finalizer_worker'",
-        block_num
-    ).execute(pg).await?;
+        r#"
+        INSERT INTO decoder_state (id, last_processed_block, last_processed_hash, updated_at)
+        VALUES ('finalizer_worker', $1::bigint, $2, NOW())
+        ON CONFLICT (id) DO UPDATE SET
+            last_processed_block = EXCLUDED.last_processed_block,
+            last_processed_hash = EXCLUDED.last_processed_hash,
+            updated_at = NOW()
+        "#,
+        block_num,
+        block_hash
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Global chain's state (for api)
+    if !block_hash.is_empty() {
+        sqlx::query!(
+            r#"
+            INSERT INTO chain_state (chain_id, finalized_number, finalized_hash)
+            VALUES ($1::bigint, $2::bigint, $3)
+            ON CONFLICT (chain_id) DO UPDATE SET
+                finalized_number = EXCLUDED.finalized_number,
+                finalized_hash = EXCLUDED.finalized_hash
+            "#,
+            chain_id as i64,
+            block_num,
+            block_hash
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
     Ok(())
 }
