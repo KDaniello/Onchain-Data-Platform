@@ -31,3 +31,7 @@ config = "0.15.19"
 
 anyhow = "1.0"
 dotenv = "0.15"
+
+# Metrics
+metrics = "0.24.3"
+metrics-exporter-prometheus = "0.18.1"

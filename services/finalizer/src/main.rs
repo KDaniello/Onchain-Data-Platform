@@ -6,6 +6,8 @@ use dotenv::dotenv;
 use sqlx::postgres::PgPool;
 use std::time::Duration;
 use tracing::{info, error};
+use common::metrics::init_metrics;
+use metrics::{counter, gauge};
 
 #[derive(sqlx::FromRow)]
 struct BlockInfo {
@@ -16,6 +18,9 @@ struct BlockInfo {
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
+
+    init_metrics(9094)?; // 9094 port for finalizer
+
     let settings = Settings::new().context("Config")?;
 
     tracing_subscriber::fmt()
@@ -151,6 +156,9 @@ async fn run_loop(ch: &ClickHouseClient, pg: &PgPool, depth: i64, batch_size: i6
     ch.query(&query_transfers).execute().await?;
 
     update_cursor(pg, chain_id, end_block, &end_hash).await?;
+
+    gauge!("finalizer_head_block").set(end_block as f64);
+    counter!("finalizer_blocks_total").increment(blocks.len() as u64);
 
     info!("Finalized up to {}", end_block);
 
