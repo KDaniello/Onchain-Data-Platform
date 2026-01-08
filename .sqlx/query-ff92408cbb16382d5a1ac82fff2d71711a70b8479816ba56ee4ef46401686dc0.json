@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT status FROM canonical_blocks \n        WHERE chain_id = $1::bigint AND number = $2::bigint AND hash = $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bpchar"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ff92408cbb16382d5a1ac82fff2d71711a70b8479816ba56ee4ef46401686dc0"
+}

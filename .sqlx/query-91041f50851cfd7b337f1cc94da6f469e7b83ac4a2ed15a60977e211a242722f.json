@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    SELECT number FROM canonical_blocks \n                    WHERE chain_id = $1::bigint AND status = 'canonical' AND number < $2::bigint\n                    ORDER BY number DESC\n                    LIMIT 1\n                    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "number",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "91041f50851cfd7b337f1cc94da6f469e7b83ac4a2ed15a60977e211a242722f"
+}

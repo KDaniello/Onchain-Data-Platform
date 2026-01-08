@@ -3,7 +3,7 @@ use alloy::{
     primitives::{Log, LogData},
     sol_types::SolEvent
 };
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use clickhouse::Client as ClickHouseClient;
 use common::{models::{RawLog, Erc20Transfer}, settings::Settings, db::{connect_ch, connect_pg}};
 use dotenv::dotenv;
@@ -11,12 +11,12 @@ use std::{time::Duration};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use sqlx::postgres::{PgPool};
+use common::shutdown::shutdown_signal;
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
 }
 
-const SAFE_REORG_DEPTH: i64 = 64;
 const BATCH_SIZE: i64 = 500;
 
 #[tokio::main]
@@ -33,8 +33,6 @@ async fn main() -> Result<()> {
     // Settings
     let settings = Settings::new().context("Config load failed")?;
 
-    info!("Starting Decoder Service...");
-
     // ClickHouse
     let ch = connect_ch(&settings.clickhouse);
 
@@ -45,18 +43,102 @@ async fn main() -> Result<()> {
     let transfer_topic = Transfer::SIGNATURE_HASH.to_string();
     info!("Targeting Transfer topic: {}", transfer_topic);
 
+    // Shutdown
+    let mut shutdown_rx = shutdown_signal().subscribe();
+
+    info!("Starting Decoder Service...");
+
     loop {
-        if let Err(e) = processing_loop(&ch, &pg_pool, &transfer_topic, settings.chain.chain_id).await {
-            error!("Error in decoder loop: {:?}. Sleeping...", e);
-            sleep(Duration::from_secs(5)).await;
-        }
+        tokio::select! {
+            res = processing_loop(&ch, &pg_pool, &transfer_topic, settings.chain.chain_id) => {
+                if let Err(e) = res {
+                    error!("Decoder error: {:?}. Retrying...", e);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+            _ = shutdown_rx.recv() => {
+                info!("🛑 Shutting down decoder...");
+                break;
+            }
+        }      
     }
+
+    Ok(())
+
 }
 
 #[derive(sqlx::FromRow)]
 struct BlockInfo {
     number: i64,
     hash: String,
+}
+
+/// Checks if the latest block has become orphaned
+/// Return safe block number to start decoding from
+async fn check_cursor_validity(
+    pg: &PgPool, 
+    chain_id: u64, 
+    last_processed_block: i64,
+    last_processed_hash: Option<String>
+) -> Result<i64> {
+
+    if last_processed_block == 0 {
+        return Ok(0);
+    }
+
+    // If we dont have previous hash, believe that number or reset
+    let Some(last_hash) = last_processed_hash else {
+        return Ok(last_processed_block);
+    };
+
+    // Check that block's status in canonical_blocks
+    let status_row = sqlx::query!(
+        r#"
+        SELECT status FROM canonical_blocks 
+        WHERE chain_id = $1::bigint AND number = $2::bigint AND hash = $3
+        "#,
+        chain_id as i64,
+        last_processed_block,
+        last_hash
+    )
+    .fetch_optional(pg)
+    .await?;
+
+    match status_row {
+        Some(row) => {
+            if row.status == "canonical" {
+                // Ok
+                Ok(last_processed_block)
+            } else {
+                // block becomes orphan! Or finalized
+                // If orphan, we need to back
+                warn!("🚨 Decoder cursor is on ORPHAN block {} ({}). Rolling back...", last_processed_block, last_hash);
+
+                let valid = sqlx::query!(
+                    r#"
+                    SELECT number FROM canonical_blocks 
+                    WHERE chain_id = $1::bigint AND status = 'canonical' AND number < $2::bigint
+                    ORDER BY number DESC
+                    LIMIT 1
+                    "#,
+                    chain_id as i64,
+                    last_processed_block
+                )
+                .fetch_optional(pg)
+                .await?;
+
+                let safe_block = valid.map(|r| r.number).unwrap_or(0);
+                info!("🔄 Rolled back decoder to block {}", safe_block);
+                Ok(safe_block)
+            }
+        },
+        None => {
+            // Block is absent in DB?
+            // Let back
+            warn!("Decoder cursor block not found in DB. Rolling back 100 blocks.");
+            Ok((last_processed_block - 100).max(0))
+        }
+    }
 }
 
 /// Loop decoded
@@ -68,15 +150,29 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
     .await?;
 
     // Find, where we stopped
-    let (last_processed, last_hash) = match state {
+    let (mut last_processed, last_hash) = match state {
         Some(r) => (r.last_processed_block, r.last_processed_hash.map(|h| h.trim().to_string())),
         None => {
-            // Инициализация, если нет записи
+            // Init, if there is no record
             sqlx::query!("INSERT INTO decoder_state (id, last_processed_block) VALUES ('erc20_worker', 0)")
                 .execute(pg).await?;
             (0, None)
         }
     };
+
+    // Check for reorg
+    let verified_block = check_cursor_validity(pg, chain_id, last_processed, last_hash).await?;
+    if verified_block != last_processed {
+        // If cursor is changed (there was a rollback), update var and DB
+        last_processed = verified_block;
+        // Update DB to fix rollback
+        sqlx::query!(
+            "UPDATE decoder_state SET last_processed_block = $1::bigint, last_processed_hash = NULL WHERE id = 'erc20_worker'",
+            last_processed
+        )
+        .execute(pg)
+        .await?;
+    }
 
     // canonical tip
     let tip = sqlx::query_as!(
@@ -106,38 +202,7 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
         return Ok(());
     }
 
-    // Check if it was reorg 
-    let mut reorg_detected = false;
-    if last_processed > 0 {
-        if let Some(stored_hash) = last_hash {
-            let current_hash_row = sqlx::query!(
-                r#"
-                SELECT hash
-                FROM canonical_blocks
-                WHERE chain_id = $1::bigint AND status = 'canonical' AND number = $2::bigint
-                LIMIT 1
-                "#,
-                chain_id as i64,
-                last_processed
-            )
-            .fetch_optional(pg)
-            .await?;
-
-            match current_hash_row {
-                Some(r) if r.hash != stored_hash => reorg_detected = true,
-                None => reorg_detected = true,
-                _ => {}
-            }
-        }
-    }
-
-    // Calculate Start Block
-    let start_scan_block = if reorg_detected {
-        warn!("Reorg detected! Rolling back...");
-        (last_processed - SAFE_REORG_DEPTH + 1).max(0)
-    } else {
-        last_processed + 1
-    };
+    let start_scan_block = last_processed + 1;
 
     // Get canonical batch from Postgres
     let canonical_batch = sqlx::query_as!(
