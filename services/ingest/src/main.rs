@@ -10,6 +10,7 @@ use chrono::{TimeZone, Utc};
 use clickhouse::{Client as ClickHouseClient};
 use common::{
     db::{connect_ch, connect_pg}, models::RawLog, settings::{Settings}};
+use common::shutdown::shutdown_signal;
 use dotenv::dotenv;
 use sqlx::{postgres::{PgPool}};
 use tracing::{info, error, warn};
@@ -68,12 +69,27 @@ async fn main() -> Result<()> {
 
     info!("All systems go. Starting ingestion loop.");
 
+        let notify_shutdown = shutdown_signal();
+        let mut shutdown_rx = notify_shutdown.subscribe();
+
     loop {
-        if let Err(e) = processing_loop(&pg_pool, &ch_client, &provider, &settings).await {
-            error!("Error in ingestion loop {:?}. Retrying in 5s...", e);
-            sleep(Duration::from_secs(5)).await;
+        tokio::select! {
+            res = processing_loop(&pg_pool, &ch_client, &provider, &settings) => {
+                if let Err(e) = res {
+                    error!("Error in ingestion loop: {:?}. Retrying in 5s...", e);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+
+            _ = shutdown_rx.recv() => {
+                info!("🛑 Shutting down ingest service gracefully...");
+                break;
+            }
         }
     }
+
+    info!("Service stopped!");
+    Ok(())
 }
 
 /// Define next block and get it
