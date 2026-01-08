@@ -1,13 +1,19 @@
 global:
-  scrape_interval: 5s # Собирать метрики каждые 5 секунд
+  scrape_interval: 5s # Test: 5s - Prod: 15-30s
 
 scrape_configs:
-  - job_name: 'prometheus'
+  - job_name: 'ingest'
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ['172.26.244.116:9091']
 
-  - job_name: 'ingest-service'
+  - job_name: 'decode'
     static_configs:
-      # 172.17.0.1 - это стандартный IP хоста изнутри Docker контейнера на Linux.
-      # Если не заработает, попробуем host.docker.internal
-      - targets: ['host.docker.internal:9091']
+      - targets: ['172.26.244.116:9092']
+
+  - job_name: 'api'
+    static_configs:
+      - targets: ['172.26.244.116:9093']
+
+  - job_name: 'finalizer'
+    static_configs:
+      - targets: ['172.26.244.116:9094']
