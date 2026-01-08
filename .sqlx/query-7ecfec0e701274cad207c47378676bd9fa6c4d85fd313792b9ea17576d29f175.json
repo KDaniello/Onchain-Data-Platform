@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO decoder_state (id, last_processed_block, last_processed_hash, updated_at)\n        VALUES ('finalizer_worker', $1::bigint, $2, NOW())\n        ON CONFLICT (id) DO UPDATE SET\n            last_processed_block = EXCLUDED.last_processed_block,\n            last_processed_hash = EXCLUDED.last_processed_hash,\n            updated_at = NOW()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bpchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7ecfec0e701274cad207c47378676bd9fa6c4d85fd313792b9ea17576d29f175"
+}
