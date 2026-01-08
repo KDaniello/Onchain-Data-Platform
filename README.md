@@ -30,7 +30,7 @@ Built for Ethereum, designed to extend to other chains.
 
 ## Why I built this
 
-I kept seeing blockchain indexers that break silently when reorgs happen. Data becomes inconsistent, balances don't match, events get duplicated or lost.
+This is a pet project as part of my training in Backend Data and DevOps development in the Blockchain.
 
 This project demonstrates how to build indexing infrastructure that handles the messy reality of blockchain consensus — where the "latest block" might not be the latest block in 30 seconds.
 
@@ -38,51 +38,146 @@ This project demonstrates how to build indexing infrastructure that handles the 
 
 ## Architecture
 
-```mermaid
-graph TD
-    %% Actors
-    User([User / Client])
-    RPC[Blockchain RPC]
+### Services
 
-    %% Subgraph: Infrastructure
-    subgraph "Infrastructure"
-        direction TB
-        PG[(Postgres\nControl Plane)]
-        CH[(ClickHouse\nData Lake)]
-    end
+| Service | Port | Input | Output | Storage |
+|---------|------|-------|--------|---------|
+| **Ingest** | 9091 | Ethereum RPC | Raw blocks & logs | ClickHouse: `raw_logs_head` |
+| **Decode** | 9092 | `raw_logs_head` | Typed events | ClickHouse: `erc20_transfers_head` |
+| **Finalizer** | 9094 | Head tables | Confirmed data | ClickHouse: `*_finalized` |
+| **API** | 4000 | HTTP requests | JSON responses | Reads from both DBs |
 
-    %% Subgraph: Microservices
-    subgraph "Rust Microservices"
-        Ingest[Ingest Service]
-        Decode[Decode Service]
-        Finalizer[Finalizer Service]
-        API[API Service]
-    end
+### Databases
 
-    %% Flows - Ingestion
-    RPC ==>|Blocks & Logs| Ingest
-    Ingest -->|1. Write Canonical Header| PG
-    Ingest -->|2. Write Raw Logs| CH
-    Ingest -.->|Detect Reorgs| PG
+| Database | Purpose | Tables |
+|----------|---------|--------|
+| **ClickHouse** | Event storage (analytical) | `raw_logs_head`, `erc20_transfers_head`, `*_finalized` |
+| **Postgres** | Control plane (transactional) | `canonical_blocks`, `chain_state`, `reorg_audit` |
 
-    %% Flows - Decoding
-    Decode -->|3. Read Raw Logs| CH
-    Decode -->|4. Check Validity| PG
-    Decode -->|5. Write Transfers| CH
+### Data Flow
 
-    %% Flows - Finalization
-    Finalizer -->|6. Check Depth| PG
-    Finalizer -->|7. Move to Finalized| CH
+1. **Ingest** fetches blocks from RPC, detects reorgs, writes raw logs
+2. **Decode** reads raw logs, extracts ERC-20 Transfer events
+3. **Finalizer** moves confirmed blocks (depth > 64) to finalized tables
+4. **API** serves queries, filters orphaned data via canonical JOIN
 
-    %% Flows - API
-    User ==>|HTTP Request| API
-    API -->|8. Get Canonical List| PG
-    API -->|9. Fetch Filtered Data| CH
-    API ==>|JSON Response| User
+### How reorg detection works
 
-    %% Styling
-    classDef storage fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
-    classDef service fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
-    class PG,CH storage;
-    class Ingest,Decode,Finalizer,API service;
+1. New block arrives
+2. Compare `parent_hash` with our canonical tip
+3. If mismatch → walk back via `parent_hash` until we find common ancestor (LCA)
+4. Mark all blocks after LCA as `orphan`
+5. Log to `reorg_audit` table
+6. Continue indexing from new chain
+
+Data in ClickHouse is never deleted immediately — orphaned data is filtered out via JOIN on canonical blocks. This keeps the system idempotent.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Docker & Docker Compose
+- Rust 1.92+ (if building from source)
+- Ethereum RPC endpoint (Alchemy, Infura, or your own node)
+
+### Run with Docker
+
+```bash
+# Clone
+git clone https://github.com/yourusername/onchain-data-platform.git
+cd onchain-data-platform
+
+# Configure
+cp .env.example .env
+# Edit .env — add your RPC_URL
+
+# Start infrastructure
+make up
+
+# Stop infrastructure
+make down
+
+# DANGER! Delete all data
+make nuke
+
+# Apply migrations
+make migrate
+
+# Run Services
+cargo run --package ingest
+cargo run --package decode
+cargo run --package finalizer
+cargo run --package api
 ```
+
+### Verify it works
+
+```bash
+# Health check
+curl http://localhost:4000/health
+
+# Current indexer head
+curl http://localhost:4000/head
+
+# Recent ERC-20 transfers
+curl http://localhost:4000/transfers?limit=10
+```
+
+## Project Structure
+
+```text
+├── crates/
+│   └── common/              # Shared code: DB, models, config
+│
+├── services/
+│   ├── ingest/              # Fetches blocks, detects reorgs
+│   ├── decode/              # Decodes raw logs → typed events
+│   ├── finalizer/           # Moves confirmed data to finalized layer
+│   └── api/                 # REST API
+│
+├── db/
+│   ├── postgres/            # Control plane schema
+│   └── clickhouse/          # Data layer schema
+│
+├── deploy/
+│   └── docker-compose.yml
+│
+└── dashboards/              # Grafana dashboards
+```
+
+## API Reference
+### GET /health
+Health check endpoint.
+
+### GET /head
+Returns current indexer state.
+```JSON
+{
+  "chain_id": 1,
+  "head_number": 19543210,
+  "head_hash": "0xabc...",
+  "finalized_number": 19543146,
+  "lag_blocks": 2,
+  "updated_at": "2024-01-15T10:30:00Z"
+}
+```
+
+### GET /transfers
+Query ERC-20 transfers.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| token | string | Filter by token address
+| from_block | int | Start block
+| to_block | int | End block
+| limit | int | Max results (default: 50, max: 1000)
+| layer | string | head or finalized
+
+[Full API documentation](docs/openapi.yaml)
+
+## 🛠️ Tech Stack
+- Core: Rust (Tokio, Axum, Alloy, SQLx)
+- Storage: ClickHouse (Analytics), Postgres (State)
+- Ops: Docker Compose, Prometheus, Grafana
