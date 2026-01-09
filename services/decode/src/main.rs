@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 use alloy::{
     primitives::{Log, LogData},
     sol,

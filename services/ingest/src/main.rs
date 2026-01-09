@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 mod reorg;
 use reorg::{apply_reorg, detect_and_handle_reorg};
 
@@ -296,7 +298,7 @@ where
             address: log.address().to_string().to_lowercase(),
             topic0: log
                 .topics()
-                .get(0)
+                .first()
                 .map(|t| t.to_string())
                 .unwrap_or_default(),
             topic1: log
