@@ -17,11 +17,11 @@ const MAX_REORG_DEPTH: u32 = 128;
 
 /// Main detection's function
 /// Compare local base with data from rpc, finding point of difference
-pub async fn detect_and_handle_reorg<P>(
+pub async fn detect_and_handle_reorg<P, T>(
     pool: &PgPool, 
     provider: &P, 
     chain_id: u64, 
-    new_block: &Block, 
+    new_block: &Block<T>, 
     local_tip_num: i64, 
     local_tip_hash: String) -> Result<ReorgResult>
 where P: Provider
@@ -110,11 +110,11 @@ where P: Provider
     }
 }
 
-pub async fn apply_reorg(
+pub async fn apply_reorg<T>(
     pool: &PgPool,
     chain_id: u64,
     reorg: &ReorgResult,
-    new_tip_block: &Block
+    new_tip_block: &Block<T>
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
 
@@ -173,4 +173,147 @@ pub async fn apply_reorg(
     info!("✅ Reorg applied successfully. New DB head is LCA: {}", reorg.lca_number);
 
     Ok(())
+}
+
+/// Tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::{db::connect_pg, settings::Settings};
+    use std::str::FromStr;
+    use alloy::primitives::B256;
+    use sqlx::postgres::PgPool;
+
+    // Хелпер для создания фейкового блока (заголовка)
+    fn create_mock_block(number: u64, hash: &str, parent: &str) -> Block<B256> {
+        let mut block: Block<B256> = Block::default();
+        block.header.number = number;
+        block.header.hash = B256::from_str(hash).unwrap();
+        block.header.parent_hash = B256::from_str(parent).unwrap();
+        block.header.timestamp = 1234567890;
+        block
+    }
+
+    // Хелпер для вставки блока в БД напрямую
+    async fn insert_block(pool: &PgPool, chain_id: u64, number: i64, hash: &str, status: &str) {
+        sqlx::query!(
+            r#"
+            INSERT INTO canonical_blocks (chain_id, number, hash, parent_hash, block_timestamp, status)
+            VALUES ($1, $2, $3, $4, NOW(), $5)
+            "#,
+            chain_id as i64,
+            number,
+            hash,
+            "0x0000000000000000000000000000000000000000000000000000000000000000", // dummy parent
+            status
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_apply_reorg_db_logic() {
+        // 1. Setup
+        dotenv::dotenv().ok();
+        let settings = Settings::new().expect("Config");
+        let pool = connect_pg(&settings.database).await.expect("DB Connect");
+        
+        let chain_id = 99999; 
+
+        // Чистим хвосты от прошлых тестов
+        sqlx::query!("DELETE FROM canonical_blocks WHERE chain_id = $1", chain_id)
+            .execute(&pool).await.unwrap();
+        sqlx::query!("DELETE FROM reorg_audit WHERE chain_id = $1", chain_id)
+            .execute(&pool).await.unwrap();
+        sqlx::query!("DELETE FROM chain_state WHERE chain_id = $1", chain_id)
+            .execute(&pool).await.unwrap();
+
+        // 2. Prepare Data: Chain 100 -> 101
+        let hash_100 = "0x0000000000000000000000000000000000000000000000000000000000000100";
+        let hash_101 = "0x0000000000000000000000000000000000000000000000000000000000000101";
+        
+        insert_block(&pool, chain_id as u64, 100, hash_100, "canonical").await;
+        insert_block(&pool, chain_id as u64, 101, hash_101, "canonical").await;
+
+        // --- ВАЖНОЕ ИСПРАВЛЕНИЕ ТУТ ---
+        // Мы должны создать начальное состояние chain_state, чтобы apply_reorg мог его обновить
+        sqlx::query!(
+            "INSERT INTO chain_state (chain_id, head_number, head_hash) VALUES ($1::bigint, 101, $2)",
+            chain_id as i64,
+            hash_101
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // ------------------------------
+
+        // 3. Simulate Reorg
+        // Допустим, мы поняли, что 101 - плохой. LCA = 100.
+        // Новый блок 101_NEW (который пришел из RPC)
+        let hash_101_new = "0x0000000000000000000000000000000000000000000000000000000000000102";
+        let new_tip_block = create_mock_block(101, hash_101_new, hash_100);
+
+        let reorg_result = ReorgResult {
+            lca_number: 100,
+            lca_hash: hash_100.to_string(),
+            depth: 1,
+            orphaned_blocks: vec![(101, hash_101.to_string())],
+        };
+
+        // 4. Action
+        apply_reorg(&pool, chain_id as u64, &reorg_result, &new_tip_block)
+            .await
+            .expect("Apply reorg failed");
+
+        // 5. Verify
+
+        // A. Блок 101 должен стать ORPHAN
+        let status_opt = sqlx::query!(
+            "SELECT status FROM canonical_blocks WHERE chain_id = $1::bigint AND hash = $2",
+            chain_id as i64, 
+            hash_101
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+
+        if status_opt.is_none() {
+            panic!("❌ Block 101 not found in DB! Check insert logic.");
+        }
+        assert_eq!(status_opt.unwrap().status, "orphan");
+
+        // B. Блок 100 должен остаться CANONICAL
+        let status_100 = sqlx::query!(
+            "SELECT status FROM canonical_blocks WHERE chain_id = $1::bigint AND hash = $2",
+            chain_id as i64, 
+            hash_100
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status_100.status, "canonical");
+
+        // C. Chain State
+        let state = sqlx::query!(
+            "SELECT head_number FROM chain_state WHERE chain_id = $1::bigint", 
+            chain_id as i64
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        
+        // Теперь здесь будет 100, потому что запись была создана и успешно обновлена
+        assert_eq!(state.head_number, 100);
+
+        // D. Audit log должен быть записан
+        let audit = sqlx::query!("SELECT * FROM reorg_audit WHERE chain_id = $1", chain_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(audit.depth, 1);
+        assert_eq!(audit.lca_number, 100);
+
+        println!("✅ Test Passed: Reorg logic correctly orphaned block 101 and updated state.");
+    }
 }
