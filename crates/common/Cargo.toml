@@ -35,3 +35,8 @@ dotenv = "0.15"
 # Metrics
 metrics = "0.24.3"
 metrics-exporter-prometheus = "0.18.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio-native-tls", "postgres"] }
+uuid = { version = "1", features = ["v4"] }
