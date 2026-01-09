@@ -1,6 +1,6 @@
-use axum::{extract::State, Json};
-use common::models::ChainState;
 use crate::AppState;
+use axum::{Json, extract::State};
+use common::models::ChainState;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -10,7 +10,7 @@ pub struct HeadResponse {
     pub head_hash: String,
     pub finalized_number: i64,
     pub lag_blocks: i64,
-    pub updated_at: String
+    pub updated_at: String,
 }
 
 pub async fn get_head(State(state): State<AppState>) -> Json<Option<HeadResponse>> {
@@ -29,7 +29,7 @@ pub async fn get_head(State(state): State<AppState>) -> Json<Option<HeadResponse
         head_hash: s.head_hash,
         finalized_number: s.finalized_number,
         lag_blocks: 0, // TODO: Implement RPC check
-        updated_at: s.updated_at.map(|t| t.to_rfc3339()).unwrap_or_default()
+        updated_at: s.updated_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
     });
 
     Json(response)

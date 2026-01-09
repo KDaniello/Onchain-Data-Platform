@@ -1,18 +1,21 @@
 use anyhow::{Context, Result};
-use clickhouse::{Client as ClickHouseClient};
-use common::{db::{connect_ch, connect_pg}, settings::Settings};
+use clickhouse::Client as ClickHouseClient;
+use common::metrics::init_metrics;
 use common::shutdown::shutdown_signal;
+use common::{
+    db::{connect_ch, connect_pg},
+    settings::Settings,
+};
 use dotenv::dotenv;
+use metrics::{counter, gauge};
 use sqlx::postgres::PgPool;
 use std::time::Duration;
-use tracing::{info, error};
-use common::metrics::init_metrics;
-use metrics::{counter, gauge};
+use tracing::{error, info};
 
 #[derive(sqlx::FromRow)]
 struct BlockInfo {
     number: i64,
-    hash: String
+    hash: String,
 }
 
 #[tokio::main]
@@ -24,8 +27,10 @@ async fn main() -> Result<()> {
     let settings = Settings::new().context("Config")?;
 
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive(tracing::Level::INFO.into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
         .init();
 
     let ch = connect_ch(&settings.clickhouse);
@@ -56,12 +61,16 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-
-    
 }
 
 /// Finalizer loop
-async fn run_loop(ch: &ClickHouseClient, pg: &PgPool, depth: i64, batch_size: i64, chain_id: u64) -> Result<()> {
+async fn run_loop(
+    ch: &ClickHouseClient,
+    pg: &PgPool,
+    depth: i64,
+    batch_size: i64,
+    chain_id: u64,
+) -> Result<()> {
     let state = sqlx::query!(
         "SELECT last_processed_block FROM decoder_state WHERE id = 'finalizer_worker'"
     )
@@ -88,7 +97,10 @@ async fn run_loop(ch: &ClickHouseClient, pg: &PgPool, depth: i64, batch_size: i6
 
     // Wait for safe height
     if last_finalized >= safe_height {
-        info!("Synced to safe height {}. Waiting for new blocks...", safe_height);
+        info!(
+            "Synced to safe height {}. Waiting for new blocks...",
+            safe_height
+        );
         tokio::time::sleep(Duration::from_secs(10)).await;
         return Ok(());
     }
@@ -123,16 +135,22 @@ async fn run_loop(ch: &ClickHouseClient, pg: &PgPool, depth: i64, batch_size: i6
     let end_block = blocks.last().unwrap().number;
     let end_hash = blocks.last().unwrap().hash.clone();
 
-    let hashes_str = blocks.iter()
+    let hashes_str = blocks
+        .iter()
         .map(|b| format!("'{}'", b.hash))
         .collect::<Vec<_>>()
         .join(",");
 
-    info!("Finalizing blocks {} -> {} ({} blocks)", blocks[0].number, end_block, blocks.len());
+    info!(
+        "Finalizing blocks {} -> {} ({} blocks)",
+        blocks[0].number,
+        end_block,
+        blocks.len()
+    );
 
     // Copy data from Head to Finalized
     // Copy only data, which block_chain is matched with canonical
-    
+
     // Logs
     let query_logs = format!(
         r#"
@@ -167,9 +185,8 @@ async fn run_loop(ch: &ClickHouseClient, pg: &PgPool, depth: i64, batch_size: i6
 
 /// Get next block
 async fn update_cursor(pg: &PgPool, chain_id: u64, block_num: i64, block_hash: &str) -> Result<()> {
-    
     let mut tx = pg.begin().await?;
-    
+
     // Worker's cursor
     sqlx::query!(
         r#"

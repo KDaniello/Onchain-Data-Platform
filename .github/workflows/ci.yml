@@ -11,6 +11,14 @@ env:
   CARGO_TERM_COLOR: always
   # Указываем путь к БД для sqlx (макрос query! использует это при компиляции)
   DATABASE_URL: postgres://admin:admin@localhost:5432/onchain_data
+  APP_CLICKHOUSE__URL: "http://localhost:8123"
+  APP_CLICKHOUSE__USER: "default"
+  APP_CLICKHOUSE__DB: "onchain_data"
+  APP_CLICKHOUSE__PASSWORD: ""
+  APP_CHAIN__RPC_URL: "https://eth.llamarpc.com"
+  APP_CHAIN__CHAIN_ID: 1
+  APP_CHAIN__START_BLOCK: 18000000 
+  APP_CHAIN__REORG_DEPTH: 64
 
 jobs:
   test:

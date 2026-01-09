@@ -1,7 +1,7 @@
-use sqlx::{FromRow, Type};
 use chrono::{DateTime, Utc};
 use clickhouse::Row;
 use serde::{Deserialize, Serialize};
+use sqlx::{FromRow, Type};
 
 /// Block's status on chain
 /// Canonical - part of canonical chain.
@@ -12,7 +12,7 @@ pub enum BlockStatus {
     #[default]
     Canonical,
     Orphan,
-    Finalized
+    Finalized,
 }
 
 // Blockstatus -> String in Postgres
@@ -25,13 +25,13 @@ impl Type<sqlx::Postgres> for BlockStatus {
 // Status -> String
 impl sqlx::Encode<'_, sqlx::Postgres> for BlockStatus {
     fn encode_by_ref(
-            &self,
-            buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer<'_>,
-        ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        &self,
+        buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer<'_>,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
         let s = match self {
             BlockStatus::Canonical => "canonical",
             BlockStatus::Orphan => "orphan",
-            BlockStatus::Finalized => "finalized"
+            BlockStatus::Finalized => "finalized",
         };
         <String as sqlx::Encode<sqlx::Postgres>>::encode_by_ref(&s.to_string(), buf)
     }
@@ -39,7 +39,9 @@ impl sqlx::Encode<'_, sqlx::Postgres> for BlockStatus {
 
 // String -> Status
 impl<'r> sqlx::Decode<'r, sqlx::Postgres> for BlockStatus {
-    fn decode(value: <sqlx::Postgres as sqlx::Database>::ValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+    fn decode(
+        value: <sqlx::Postgres as sqlx::Database>::ValueRef<'r>,
+    ) -> Result<Self, sqlx::error::BoxDynError> {
         let s: String = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
         match s.as_str() {
             "canonical" => Ok(BlockStatus::Canonical),
@@ -58,7 +60,7 @@ pub struct CanonicalBlock {
     pub parent_hash: String,
     pub block_timestamp: DateTime<Utc>,
     pub status: BlockStatus,
-    pub inserted_at: Option<DateTime<Utc>>
+    pub inserted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -67,7 +69,7 @@ pub struct Chainstate {
     pub head_number: i64,
     pub head_hash: String,
     pub finalized_number: i64,
-    pub updated_at: Option<DateTime<Utc>>
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// Model for ClickHouse
@@ -86,7 +88,7 @@ pub struct RawLog {
     pub topic3: String,
     pub data: String,
     pub block_timestamp: u32,
-    pub inserted_at: u64
+    pub inserted_at: u64,
 }
 
 /// Decode model
@@ -104,7 +106,7 @@ pub struct Erc20Transfer {
     pub to_address: String,
     pub value: String,
     pub value_approx: f64,
-    pub inserted_at: u64
+    pub inserted_at: u64,
 }
 
 /// Global state of the indexer for a specific chain
@@ -115,7 +117,7 @@ pub struct ChainState {
     pub head_hash: String,
     pub finalized_number: i64,
     pub finalized_hash: Option<String>,
-    pub updated_at: Option<DateTime<Utc>>
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// Audit log for reorg events
@@ -132,5 +134,5 @@ pub struct ReorgAudit {
     pub lca_hash: String,
     pub depth: i32,
     pub blocks_orphaned: i32,
-    pub reprocessed: Option<bool>
+    pub reprocessed: Option<bool>,
 }

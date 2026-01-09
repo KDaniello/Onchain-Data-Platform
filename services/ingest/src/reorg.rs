@@ -1,16 +1,14 @@
-use alloy::{
-    providers::{Provider}, rpc::types::{Block}
-};
+use alloy::{providers::Provider, rpc::types::Block};
 use anyhow::{Ok, Result, anyhow};
 use sqlx::PgPool;
-use tracing::{info};
+use tracing::info;
 
 // Results of analysis of reorgs
 pub struct ReorgResult {
     pub lca_number: i64,
     pub lca_hash: String,
     pub depth: u32,
-    pub orphaned_blocks: Vec<(i64, String)>
+    pub orphaned_blocks: Vec<(i64, String)>,
 }
 
 const MAX_REORG_DEPTH: u32 = 128;
@@ -18,19 +16,23 @@ const MAX_REORG_DEPTH: u32 = 128;
 /// Main detection's function
 /// Compare local base with data from rpc, finding point of difference
 pub async fn detect_and_handle_reorg<P, T>(
-    pool: &PgPool, 
-    provider: &P, 
-    chain_id: u64, 
-    new_block: &Block<T>, 
-    local_tip_num: i64, 
-    local_tip_hash: String) -> Result<ReorgResult>
-where P: Provider
+    pool: &PgPool,
+    provider: &P,
+    chain_id: u64,
+    new_block: &Block<T>,
+    local_tip_num: i64,
+    local_tip_hash: String,
+) -> Result<ReorgResult>
+where
+    P: Provider,
 {
-    info!("🕵️ Starting reorg detection. Local tip: {} ({}), Remote parent wants: {}", 
-        local_tip_num, local_tip_hash, new_block.header.parent_hash);
+    info!(
+        "🕵️ Starting reorg detection. Local tip: {} ({}), Remote parent wants: {}",
+        local_tip_num, local_tip_hash, new_block.header.parent_hash
+    );
 
     let mut depth = 0u32;
-    
+
     // Let check with parent new block (from RPC)
     let mut check_hash = new_block.header.parent_hash.to_string();
     let mut check_number = (new_block.header.number - 1) as i64;
@@ -44,13 +46,21 @@ where P: Provider
     loop {
         depth += 1;
         if depth > MAX_REORG_DEPTH {
-            return Err(anyhow!("🚨 Reorg too deep (> {}). Manual intervention required.", MAX_REORG_DEPTH));
+            return Err(anyhow!(
+                "🚨 Reorg too deep (> {}). Manual intervention required.",
+                MAX_REORG_DEPTH
+            ));
         }
 
         let remote_block = provider
             .get_block_by_hash(check_hash.parse()?)
             .await?
-            .ok_or_else(|| anyhow!("Critical: Could not fetch block {} from RPC during reorg analysis", check_hash))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "Critical: Could not fetch block {} from RPC during reorg analysis",
+                    check_hash
+                )
+            })?;
 
         let local_block = sqlx::query!(
             r#"
@@ -91,13 +101,13 @@ where P: Provider
                         lca_number: check_number,
                         lca_hash: check_hash,
                         depth,
-                        orphaned_blocks: orphaned_result
+                        orphaned_blocks: orphaned_result,
                     });
                 } else {
                     check_hash = remote_block.header.parent_hash.to_string();
                     check_number -= 1;
                 }
-            },
+            }
             None => {
                 check_hash = remote_block.header.parent_hash.to_string();
                 check_number -= 1;
@@ -105,7 +115,9 @@ where P: Provider
         }
 
         if check_number < 0 {
-            return Err(anyhow!("Reached genesis during reorg scan without finding LCA!"));
+            return Err(anyhow!(
+                "Reached genesis during reorg scan without finding LCA!"
+            ));
         }
     }
 }
@@ -114,11 +126,15 @@ pub async fn apply_reorg<T>(
     pool: &PgPool,
     chain_id: u64,
     reorg: &ReorgResult,
-    new_tip_block: &Block<T>
+    new_tip_block: &Block<T>,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
 
-    info!("🔄 Applying reorg: Orphan {} blocks > LCA {}", reorg.orphaned_blocks.len(), reorg.lca_number);
+    info!(
+        "🔄 Applying reorg: Orphan {} blocks > LCA {}",
+        reorg.orphaned_blocks.len(),
+        reorg.lca_number
+    );
 
     for (_num, hash) in &reorg.orphaned_blocks {
         sqlx::query!(
@@ -133,7 +149,7 @@ pub async fn apply_reorg<T>(
     let old_tip = reorg.orphaned_blocks.first();
     let (old_num, old_hash) = match old_tip {
         Some((n, h)) => (*n, h.as_str()),
-        None => (0, "")
+        None => (0, ""),
     };
 
     sqlx::query!(
@@ -170,7 +186,10 @@ pub async fn apply_reorg<T>(
     .await?;
 
     tx.commit().await?;
-    info!("✅ Reorg applied successfully. New DB head is LCA: {}", reorg.lca_number);
+    info!(
+        "✅ Reorg applied successfully. New DB head is LCA: {}",
+        reorg.lca_number
+    );
 
     Ok(())
 }
@@ -179,10 +198,10 @@ pub async fn apply_reorg<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{db::connect_pg, settings::Settings};
-    use std::str::FromStr;
     use alloy::primitives::B256;
+    use common::{db::connect_pg, settings::Settings};
     use sqlx::postgres::PgPool;
+    use std::str::FromStr;
 
     // Хелпер для создания фейкового блока (заголовка)
     fn create_mock_block(number: u64, hash: &str, parent: &str) -> Block<B256> {
@@ -218,21 +237,27 @@ mod tests {
         dotenv::dotenv().ok();
         let settings = Settings::new().expect("Config");
         let pool = connect_pg(&settings.database).await.expect("DB Connect");
-        
-        let chain_id = 99999; 
+
+        let chain_id = 99999;
 
         // Чистим хвосты от прошлых тестов
         sqlx::query!("DELETE FROM canonical_blocks WHERE chain_id = $1", chain_id)
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query!("DELETE FROM reorg_audit WHERE chain_id = $1", chain_id)
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query!("DELETE FROM chain_state WHERE chain_id = $1", chain_id)
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
 
         // 2. Prepare Data: Chain 100 -> 101
         let hash_100 = "0x0000000000000000000000000000000000000000000000000000000000000100";
         let hash_101 = "0x0000000000000000000000000000000000000000000000000000000000000101";
-        
+
         insert_block(&pool, chain_id as u64, 100, hash_100, "canonical").await;
         insert_block(&pool, chain_id as u64, 101, hash_101, "canonical").await;
 
@@ -269,7 +294,7 @@ mod tests {
         // A. Блок 101 должен стать ORPHAN
         let status_opt = sqlx::query!(
             "SELECT status FROM canonical_blocks WHERE chain_id = $1::bigint AND hash = $2",
-            chain_id as i64, 
+            chain_id as i64,
             hash_101
         )
         .fetch_optional(&pool)
@@ -284,7 +309,7 @@ mod tests {
         // B. Блок 100 должен остаться CANONICAL
         let status_100 = sqlx::query!(
             "SELECT status FROM canonical_blocks WHERE chain_id = $1::bigint AND hash = $2",
-            chain_id as i64, 
+            chain_id as i64,
             hash_100
         )
         .fetch_one(&pool)
@@ -294,13 +319,13 @@ mod tests {
 
         // C. Chain State
         let state = sqlx::query!(
-            "SELECT head_number FROM chain_state WHERE chain_id = $1::bigint", 
+            "SELECT head_number FROM chain_state WHERE chain_id = $1::bigint",
             chain_id as i64
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        
+
         // Теперь здесь будет 100, потому что запись была создана и успешно обновлена
         assert_eq!(state.head_number, 100);
 
