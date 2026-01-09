@@ -1,0 +1,80 @@
+name: CI
+
+# Триггеры: запускаем на каждый пуш в main и на любой PR
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Указываем путь к БД для sqlx (макрос query! использует это при компиляции)
+  DATABASE_URL: postgres://admin:admin@localhost:5432/onchain_data
+
+jobs:
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+
+    # 🐳 Service Containers
+    # GitHub автоматически поднимет Postgres и пробросит порты
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: admin
+          POSTGRES_DB: onchain_data
+        ports:
+          - 5432:5432
+        # Хелсчек: ждем, пока база реально запустится, прежде чем начинать шаги
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 🦀 Установка Rust
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # ⚡ Кеширование зависимостей (ускоряет CI в 10 раз)
+      - uses: Swatinem/rust-cache@v2
+
+      # 🧹 Проверка стиля кода (cargo fmt)
+      - name: Check Formatting
+        run: cargo fmt --all -- --check
+
+      # 🛠️ Установка sqlx-cli (нужен для миграций)
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
+
+      # 🗄️ Накатывание миграций
+      # Без этого тесты упадут с ошибкой "relation canonical_blocks does not exist"
+      - name: Run Migrations
+        run: sqlx migrate run --source db/postgres/migrations
+
+      # 🔍 Линтер (Clippy)
+      # Проверяет на типичные ошибки и best practices
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # 🧪 Запуск Тестов
+      # Передаем фейковые переменные окружения, так как Settings::new() будет их читать
+      - name: Run Tests
+        run: cargo test --all
+        env:
+          # ClickHouse в CI не поднимаем (тест Reorg его не использует), 
+          # но конфиг требует URL, поэтому ставим заглушку
+          APP_CLICKHOUSE__URL: "http://localhost:8123"
+          APP_CLICKHOUSE__USER: "default"
+          APP_CLICKHOUSE__DB: "onchain_data"
+          
+          # Chain настройки
+          APP_CHAIN__RPC_URL: "https://eth.llamarpc.com"
+          APP_CHAIN__CHAIN_ID: 1

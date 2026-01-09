@@ -236,7 +236,6 @@ mod tests {
         insert_block(&pool, chain_id as u64, 100, hash_100, "canonical").await;
         insert_block(&pool, chain_id as u64, 101, hash_101, "canonical").await;
 
-        // --- ВАЖНОЕ ИСПРАВЛЕНИЕ ТУТ ---
         // Мы должны создать начальное состояние chain_state, чтобы apply_reorg мог его обновить
         sqlx::query!(
             "INSERT INTO chain_state (chain_id, head_number, head_hash) VALUES ($1::bigint, 101, $2)",
@@ -246,7 +245,6 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        // ------------------------------
 
         // 3. Simulate Reorg
         // Допустим, мы поняли, что 101 - плохой. LCA = 100.
