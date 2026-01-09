@@ -1,18 +1,17 @@
-
-use serde::Deserialize;
+use crate::AppState;
 use axum::{
+    Json,
     extract::{Query, State},
     http::StatusCode,
-    Json,
 };
 use common::models::Erc20Transfer;
+use serde::Deserialize;
 use tracing::error;
-use crate::AppState;
 
 #[derive(Deserialize)]
 pub struct TransferParams {
     token: Option<String>,
-    limit: Option<u64>
+    limit: Option<u64>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -24,7 +23,6 @@ pub async fn get_transfers(
     State(state): State<AppState>,
     Query(params): Query<TransferParams>,
 ) -> Result<Json<Vec<Erc20Transfer>>, (StatusCode, String)> {
-
     let limit = params.limit.unwrap_or(50).min(1000); // Min 1000 records
 
     let canonical_hashes = sqlx::query_as!(
@@ -49,7 +47,8 @@ pub async fn get_transfers(
         return Ok(Json(vec![]));
     }
 
-    let hashes_str = canonical_hashes.iter()
+    let hashes_str = canonical_hashes
+        .iter()
         .map(|r| format!("'{}'", r.hash))
         .collect::<Vec<_>>()
         .join(",");
@@ -73,18 +72,14 @@ pub async fn get_transfers(
           AND block_hash IN ({}) 
         ORDER BY block_number DESC, log_index DESC 
         LIMIT {}
-        "#, 
+        "#,
         state.chain_id, base_query, hashes_str, limit
     );
 
-    let transfers: Vec<Erc20Transfer> = state.ch
-        .query(&query)
-        .fetch_all()
-        .await
-        .map_err(|e| {
-            error!("CH Error: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "CH Error".to_string())
-        })?;
+    let transfers: Vec<Erc20Transfer> = state.ch.query(&query).fetch_all().await.map_err(|e| {
+        error!("CH Error: {:?}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "CH Error".to_string())
+    })?;
 
     Ok(Json(transfers))
 }

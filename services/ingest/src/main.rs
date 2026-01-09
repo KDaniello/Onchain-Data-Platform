@@ -1,24 +1,26 @@
 mod reorg;
-use reorg::{detect_and_handle_reorg, apply_reorg};
+use reorg::{apply_reorg, detect_and_handle_reorg};
 
 use alloy::{
-    providers::{Provider, ProviderBuilder}, 
-    rpc::types::{Block, BlockNumberOrTag, Filter}
+    providers::{Provider, ProviderBuilder},
+    rpc::types::{Block, BlockNumberOrTag, Filter},
 };
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
-use clickhouse::{Client as ClickHouseClient};
-use common::{
-    db::{connect_ch, connect_pg}, models::RawLog, settings::{Settings}};
-use common::shutdown::shutdown_signal;
+use clickhouse::Client as ClickHouseClient;
 use common::metrics::init_metrics;
+use common::shutdown::shutdown_signal;
+use common::{
+    db::{connect_ch, connect_pg},
+    models::RawLog,
+    settings::Settings,
+};
 use dotenv::dotenv;
-use sqlx::{postgres::{PgPool}};
-use tracing::{info, error, warn};
+use metrics::{counter, gauge, histogram};
+use sqlx::postgres::PgPool;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
-use metrics::{counter, gauge, histogram};
-
+use tracing::{error, info, warn};
 
 #[derive(sqlx::FromRow)]
 struct BlockTip {
@@ -39,12 +41,16 @@ async fn main() -> Result<()> {
 
     // Logs
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
         )
         .init();
 
-    info!("Starting Ingest Service for Chain ID: {}", settings.chain.chain_id);
+    info!(
+        "Starting Ingest Service for Chain ID: {}",
+        settings.chain.chain_id
+    );
 
     // Connect to Postgres
     info!("Connecting to Postgres...");
@@ -62,8 +68,8 @@ async fn main() -> Result<()> {
 
     info!("All systems go. Starting ingestion loop.");
 
-        let notify_shutdown = shutdown_signal();
-        let mut shutdown_rx = notify_shutdown.subscribe();
+    let notify_shutdown = shutdown_signal();
+    let mut shutdown_rx = notify_shutdown.subscribe();
 
     loop {
         tokio::select! {
@@ -86,8 +92,14 @@ async fn main() -> Result<()> {
 }
 
 /// Define next block and get it
-async fn processing_loop<P>(pool: &PgPool, ch: &ClickHouseClient, provider: &P, settings: &Settings) -> Result<()>
-where P: Provider
+async fn processing_loop<P>(
+    pool: &PgPool,
+    ch: &ClickHouseClient,
+    provider: &P,
+    settings: &Settings,
+) -> Result<()>
+where
+    P: Provider,
 {
     // Start to measure time
     let start_time = Instant::now();
@@ -98,7 +110,10 @@ where P: Provider
     let local_tip = get_canonical_tip(pool, chain_id).await?;
 
     // If DB is empty start with hard-num. Otherwise take Tip + 1
-    let target_number = local_tip.as_ref().map(|(n, _)| n + 1).unwrap_or(settings.chain.start_block); 
+    let target_number = local_tip
+        .as_ref()
+        .map(|(n, _)| n + 1)
+        .unwrap_or(settings.chain.start_block);
 
     // Get next chain
     let chain_tip = provider.get_block_number().await?;
@@ -112,34 +127,42 @@ where P: Provider
 
     if target_number > chain_tip {
         gauge!("ingest_lag").set(0.0); // Lag is absent
-        info!("Synced at block {}. Waiting for new blocks...", target_number - 1);
+        info!(
+            "Synced at block {}. Waiting for new blocks...",
+            target_number - 1
+        );
         sleep(Duration::from_secs(12)).await;
         return Ok(());
     }
-    
+
     // How far behind we are
     info!("Processing block {}", target_number);
 
     // Get block
-    if let Some(block) = provider.get_block_by_number(BlockNumberOrTag::Number(target_number)).await? {
-        
+    if let Some(block) = provider
+        .get_block_by_number(BlockNumberOrTag::Number(target_number))
+        .await?
+    {
         let parent_hash = block.header.parent_hash.to_string();
 
         // Reorg check
         if let Some((tip_num, tip_hash)) = local_tip {
             if parent_hash != tip_hash {
-                warn!("⚠️ REORG DETECTED at block {}! RPC parent {} != Local tip {}. Rolling back block {}...",
-                    target_number, parent_hash, tip_hash, tip_num);
+                warn!(
+                    "⚠️ REORG DETECTED at block {}! RPC parent {} != Local tip {}. Rolling back block {}...",
+                    target_number, parent_hash, tip_hash, tip_num
+                );
 
-                // Let find Reorg blocks 
+                // Let find Reorg blocks
                 let reorg_result = detect_and_handle_reorg(
-                    pool, 
-                    provider, 
-                    chain_id, 
-                    &block, 
-                    tip_num as i64, 
-                    tip_hash
-                ).await?;
+                    pool,
+                    provider,
+                    chain_id,
+                    &block,
+                    tip_num as i64,
+                    tip_hash,
+                )
+                .await?;
 
                 // Apply to DB
                 apply_reorg(pool, chain_id, &reorg_result, &block).await?;
@@ -147,7 +170,7 @@ where P: Provider
                 return Ok(());
             }
         }
-        
+
         // Save to PG
         save_canonical_block(pool, chain_id, &block).await?;
         // Update Global state
@@ -162,7 +185,7 @@ where P: Provider
         sleep(Duration::from_secs(1)).await;
     }
 
-    Ok(()) 
+    Ok(())
 }
 
 /// Get canonical the latest block -> (number, hash)
@@ -182,11 +205,10 @@ async fn get_canonical_tip(pool: &PgPool, chain_id: u64) -> Result<Option<(u64, 
     .await?;
 
     Ok(row.map(|r| (r.number as u64, r.hash)))
-} 
+}
 
 /// function: load to TABLE canonical_blocks
-async fn save_canonical_block(pg_pool: &PgPool, chain_id: u64, block:&Block) -> Result<()> {
-
+async fn save_canonical_block(pg_pool: &PgPool, chain_id: u64, block: &Block) -> Result<()> {
     // u64 to i64
     let number = block.header.number as i64;
     let chain_id_i64 = chain_id as i64;
@@ -196,7 +218,8 @@ async fn save_canonical_block(pg_pool: &PgPool, chain_id: u64, block:&Block) -> 
     let parent_hash = block.header.parent_hash.to_string();
 
     // to DateTime<Utc>
-    let timestamp = Utc.timestamp_opt(block.header.timestamp as i64, 0)
+    let timestamp = Utc
+        .timestamp_opt(block.header.timestamp as i64, 0)
         .single()
         .context("Invalid timestamp")?;
 
@@ -216,7 +239,7 @@ async fn save_canonical_block(pg_pool: &PgPool, chain_id: u64, block:&Block) -> 
     .execute(&mut *tx)
     .await?;
 
-    // If block was orphan, let it to canonical back 
+    // If block was orphan, let it to canonical back
     sqlx::query!(
         r#"
         INSERT INTO canonical_blocks (chain_id, number, hash, parent_hash, block_timestamp, status, inserted_at)
@@ -241,10 +264,15 @@ async fn save_canonical_block(pg_pool: &PgPool, chain_id: u64, block:&Block) -> 
 }
 
 /// Get Logs from eth_getLogs and write batch to CH
-async fn fetch_and_save_logs<P>(provider: &P, ch: &ClickHouseClient, block: &Block, chain_id: u64) -> Result<()> 
-where P: Provider
+async fn fetch_and_save_logs<P>(
+    provider: &P,
+    ch: &ClickHouseClient,
+    block: &Block,
+    chain_id: u64,
+) -> Result<()>
+where
+    P: Provider,
 {
-
     let filter = Filter::new().at_block_hash(block.header.hash);
     let logs = provider.get_logs(&filter).await?;
 
@@ -260,16 +288,35 @@ where P: Provider
             chain_id,
             block_number: block.header.number,
             block_hash: block.header.hash.to_string(),
-            tx_hash: log.transaction_hash.map(|h| h.to_string()).unwrap_or_default(),
+            tx_hash: log
+                .transaction_hash
+                .map(|h| h.to_string())
+                .unwrap_or_default(),
             log_index: log.log_index.unwrap_or(0) as u32,
             address: log.address().to_string().to_lowercase(),
-            topic0: log.topics().get(0).map(|t| t.to_string()).unwrap_or_default(),
-            topic1: log.topics().get(1).map(|t| t.to_string()).unwrap_or_default(),
-            topic2: log.topics().get(2).map(|t| t.to_string()).unwrap_or_default(),
-            topic3: log.topics().get(3).map(|t| t.to_string()).unwrap_or_default(),
+            topic0: log
+                .topics()
+                .get(0)
+                .map(|t| t.to_string())
+                .unwrap_or_default(),
+            topic1: log
+                .topics()
+                .get(1)
+                .map(|t| t.to_string())
+                .unwrap_or_default(),
+            topic2: log
+                .topics()
+                .get(2)
+                .map(|t| t.to_string())
+                .unwrap_or_default(),
+            topic3: log
+                .topics()
+                .get(3)
+                .map(|t| t.to_string())
+                .unwrap_or_default(),
             data: log.data().data.to_string(),
             block_timestamp: block.header.timestamp as u32,
-            inserted_at: now_ms
+            inserted_at: now_ms,
         });
     }
 
@@ -286,9 +333,7 @@ where P: Provider
     Ok(())
 }
 
-async fn update_chain_state(
-    pool: &PgPool, chain_id: u64, block: &Block
-) -> Result<()> {
+async fn update_chain_state(pool: &PgPool, chain_id: u64, block: &Block) -> Result<()> {
     sqlx::query!(
         r#"
         INSERT INTO chain_state (chain_id, head_number, head_hash, updated_at)

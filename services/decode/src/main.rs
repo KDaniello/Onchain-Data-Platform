@@ -1,19 +1,23 @@
 use alloy::{
-    sol,
     primitives::{Log, LogData},
-    sol_types::SolEvent
+    sol,
+    sol_types::SolEvent,
 };
 use anyhow::{Context, Result};
 use clickhouse::Client as ClickHouseClient;
-use common::{models::{RawLog, Erc20Transfer}, settings::Settings, db::{connect_ch, connect_pg}};
+use common::metrics::init_metrics;
+use common::shutdown::shutdown_signal;
+use common::{
+    db::{connect_ch, connect_pg},
+    models::{Erc20Transfer, RawLog},
+    settings::Settings,
+};
 use dotenv::dotenv;
-use std::{time::Duration};
+use metrics::{counter, gauge};
+use sqlx::postgres::PgPool;
+use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
-use sqlx::postgres::{PgPool};
-use common::shutdown::shutdown_signal;
-use common::metrics::init_metrics;
-use metrics::{counter, gauge};
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -31,8 +35,10 @@ async fn main() -> Result<()> {
 
     // Logs
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive(tracing::Level::INFO.into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
         .init();
 
     // Settings
@@ -43,7 +49,7 @@ async fn main() -> Result<()> {
 
     // Postgres
     let pg_pool = connect_pg(&settings.database).await?;
-            
+
     // Get Hash topic-Transfer
     let transfer_topic = Transfer::SIGNATURE_HASH.to_string();
     info!("Targeting Transfer topic: {}", transfer_topic);
@@ -65,11 +71,10 @@ async fn main() -> Result<()> {
                 info!("🛑 Shutting down decoder...");
                 break;
             }
-        }      
+        }
     }
 
     Ok(())
-
 }
 
 #[derive(sqlx::FromRow)]
@@ -81,12 +86,11 @@ struct BlockInfo {
 /// Checks if the latest block has become orphaned
 /// Return safe block number to start decoding from
 async fn check_cursor_validity(
-    pg: &PgPool, 
-    chain_id: u64, 
+    pg: &PgPool,
+    chain_id: u64,
     last_processed_block: i64,
-    last_processed_hash: Option<String>
+    last_processed_hash: Option<String>,
 ) -> Result<i64> {
-
     if last_processed_block == 0 {
         return Ok(0);
     }
@@ -117,7 +121,10 @@ async fn check_cursor_validity(
             } else {
                 // block becomes orphan or finalized
                 // If orphan, we need to back
-                warn!("🚨 Decoder cursor is on ORPHAN block {} ({}). Rolling back...", last_processed_block, last_hash);
+                warn!(
+                    "🚨 Decoder cursor is on ORPHAN block {} ({}). Rolling back...",
+                    last_processed_block, last_hash
+                );
 
                 let valid = sqlx::query!(
                     r#"
@@ -136,7 +143,7 @@ async fn check_cursor_validity(
                 info!("🔄 Rolled back decoder to block {}", safe_block);
                 Ok(safe_block)
             }
-        },
+        }
         None => {
             // Block is absent in DB?
             // Let back
@@ -147,7 +154,12 @@ async fn check_cursor_validity(
 }
 
 /// Loop decoded
-async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &str, chain_id: u64) -> Result<()> {
+async fn processing_loop(
+    ch: &ClickHouseClient,
+    pg: &PgPool,
+    transfer_topic: &str,
+    chain_id: u64,
+) -> Result<()> {
     let state = sqlx::query!(
         r#"SELECT last_processed_block, last_processed_hash FROM decoder_state WHERE id = 'erc20_worker'"#
     )
@@ -156,11 +168,17 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
 
     // Find, where we stopped
     let (mut last_processed, last_hash) = match state {
-        Some(r) => (r.last_processed_block, r.last_processed_hash.map(|h| h.trim().to_string())),
+        Some(r) => (
+            r.last_processed_block,
+            r.last_processed_hash.map(|h| h.trim().to_string()),
+        ),
         None => {
             // Init, if there is no record
-            sqlx::query!("INSERT INTO decoder_state (id, last_processed_block) VALUES ('erc20_worker', 0)")
-                .execute(pg).await?;
+            sqlx::query!(
+                "INSERT INTO decoder_state (id, last_processed_block) VALUES ('erc20_worker', 0)"
+            )
+            .execute(pg)
+            .await?;
             (0, None)
         }
     };
@@ -247,12 +265,21 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
     let end_hash = canonical_batch.last().unwrap().hash.clone();
     info!(
         "Scanning blocks {} -> {} ({} blocks)",
-        start_scan_block, end_block, canonical_batch.len()
+        start_scan_block,
+        end_block,
+        canonical_batch.len()
     );
 
-    let hashes_str = canonical_batch.iter().map(|b| format!("'{}'", b.hash)).collect::<Vec<_>>().join(",");
+    let hashes_str = canonical_batch
+        .iter()
+        .map(|b| format!("'{}'", b.hash))
+        .collect::<Vec<_>>()
+        .join(",");
 
-    info!("Scanning blocks {} -> {} (overlap mode)", start_scan_block, end_block);
+    info!(
+        "Scanning blocks {} -> {} (overlap mode)",
+        start_scan_block, end_block
+    );
 
     // Query to CH
     let query = format!(
@@ -277,9 +304,12 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
             let t1 = log.topic1.parse().unwrap_or_default();
             let t2 = log.topic2.parse().unwrap_or_default();
             let data_bytes = hex::decode(log.data.trim_start_matches("0x")).unwrap_or_default();
-            
+
             let mut topics = vec![t0, t1, t2];
-            if !log.topic3.is_empty() && log.topic3 != "0x0000000000000000000000000000000000000000000000000000000000000000" {
+            if !log.topic3.is_empty()
+                && log.topic3
+                    != "0x0000000000000000000000000000000000000000000000000000000000000000"
+            {
                 if let std::result::Result::Ok(t3) = log.topic3.parse() {
                     topics.push(t3);
                 }
@@ -287,12 +317,12 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
 
             let alloy_log = Log {
                 address: log.address.parse().unwrap_or_default(),
-                data: LogData::new_unchecked(topics, data_bytes.into()), 
+                data: LogData::new_unchecked(topics, data_bytes.into()),
             };
 
             if let Ok(event) = Transfer::decode_log(&alloy_log) {
                 let val_str = event.value.to_string();
-                let val_approx = val_str.parse::<f64>().unwrap_or(0.0);    
+                let val_approx = val_str.parse::<f64>().unwrap_or(0.0);
 
                 let unique_ver = now_base + (i as u64);
 
@@ -303,12 +333,12 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
                     tx_hash: log.tx_hash.clone(),
                     log_index: log.log_index,
                     block_timestamp: log.block_timestamp,
-                    token_address: log.address.clone(), 
+                    token_address: log.address.clone(),
                     from_address: event.from.to_string().to_lowercase(),
                     to_address: event.to.to_string().to_lowercase(),
                     value: val_str,
                     value_approx: val_approx,
-                    inserted_at: unique_ver
+                    inserted_at: unique_ver,
                 });
             }
         }
@@ -317,8 +347,8 @@ async fn processing_loop(ch: &ClickHouseClient, pg: &PgPool, transfer_topic: &st
             let count = transfers.len() as u64; // Safe count
 
             let mut insert = ch.insert::<Erc20Transfer>("erc20_transfers_head").await?;
-            for row in transfers.iter() { 
-                insert.write(row).await?; 
+            for row in transfers.iter() {
+                insert.write(row).await?;
             }
             insert.end().await?;
 

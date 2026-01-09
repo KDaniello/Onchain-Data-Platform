@@ -9,9 +9,7 @@ pub fn init_metrics(port: u16) -> Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     let builder = PrometheusBuilder::new();
-    builder
-        .with_http_listener(addr)
-        .install()?;
+    builder.with_http_listener(addr).install()?;
 
     info!("📊 Metrics initialized on port {}", port);
     Ok(())

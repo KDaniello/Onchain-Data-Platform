@@ -1,21 +1,24 @@
 use axum::{
-    Router, 
-    extract::Request, 
-    middleware::{self, Next}, 
-    response::Response, 
-    routing::get
+    Router,
+    extract::Request,
+    middleware::{self, Next},
+    response::Response,
+    routing::get,
 };
 use clickhouse::Client as ClickHouseClient;
+use common::metrics::init_metrics;
 use common::{
-    db::{connect_ch, connect_pg}, settings::Settings, shutdown::shutdown_signal};
+    db::{connect_ch, connect_pg},
+    settings::Settings,
+    shutdown::shutdown_signal,
+};
 use dotenv::dotenv;
+use metrics::{counter, histogram};
+use sqlx::postgres::PgPool;
 use std::net::SocketAddr;
+use std::time::Instant;
 use tower_http::trace::TraceLayer;
 use tracing::info;
-use sqlx::postgres::PgPool;
-use common::metrics::init_metrics;
-use std::time::Instant;
-use metrics::{counter, histogram};
 
 mod handlers;
 
@@ -23,7 +26,7 @@ mod handlers;
 struct AppState {
     ch: ClickHouseClient,
     pg: PgPool,
-    chain_id: u64
+    chain_id: u64,
 }
 
 #[tokio::main]
@@ -33,8 +36,10 @@ async fn main() {
     init_metrics(9093).expect("Metrics init failed"); // 9093 port for API
 
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive(tracing::Level::INFO.into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
         .init();
     let settings = Settings::new().expect("Failed to load settings");
 
@@ -45,7 +50,11 @@ async fn main() {
     // PG
     let pg = connect_pg(&settings.database).await.expect("PG Connect");
 
-    let state = AppState { ch, pg, chain_id: settings.chain.chain_id };
+    let state = AppState {
+        ch,
+        pg,
+        chain_id: settings.chain.chain_id,
+    };
 
     // Router
     let app = Router::new()
@@ -74,7 +83,6 @@ async fn main() {
 }
 
 async fn track_metrics(req: Request, next: Next) -> Response {
-
     let start = Instant::now();
     let path = req.uri().path().to_owned();
     let method = req.method().clone();
@@ -89,7 +97,7 @@ async fn track_metrics(req: Request, next: Next) -> Response {
     let labels = [
         ("method", method.to_string()),
         ("path", path),
-        ("status", status)
+        ("status", status),
     ];
 
     counter!("api_requests_total", &labels).increment(1);

@@ -12,10 +12,10 @@ pub fn shutdown_signal() -> broadcast::Sender<()> {
         match signal::ctrl_c().await {
             Ok(()) => {
                 info!("🛑 Received Ctrl+C. Initiating shutdown...");
-            },
+            }
             Err(err) => {
                 info!("Unable to listen for shutdown signal: {}", err);
-            },
+            }
         }
 
         let _ = tx_clone.send(());

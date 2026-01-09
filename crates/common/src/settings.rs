@@ -7,19 +7,19 @@ pub struct Settings {
     pub server: ServerSettings,
     pub database: DatabaseSettings,
     pub clickhouse: ClickHouseSettings,
-    pub chain: ChainSettings
+    pub chain: ChainSettings,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerSettings {
     pub host: String,
-    pub port: u16
+    pub port: u16,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DatabaseSettings {
     pub url: String,
-    pub max_connections: u32
+    pub max_connections: u32,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -27,7 +27,7 @@ pub struct ClickHouseSettings {
     pub url: String,
     pub user: String,
     pub password: Option<String>,
-    pub db: String
+    pub db: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -35,7 +35,7 @@ pub struct ChainSettings {
     pub rpc_url: String,
     pub chain_id: u64,
     pub start_block: u64,
-    pub reorg_depth: u64
+    pub reorg_depth: u64,
 }
 
 impl Settings {
